@@ -40,6 +40,7 @@
 // Std
 #include <vector>
 #include <mutex>
+#include <map>
 
 // Forward declarations
 struct DeviceDispatchTable;
@@ -72,21 +73,36 @@ public:
     /// \return buffer object
     VkBuffer GetResourceBuffer(ShaderDataID rid);
 
+    /// Get the underlying buffer view of a resource
+    /// \param rid resource id
+    /// \param format the expected format
+    /// \return buffer object
+    VkBufferView GetResourceBufferView(ShaderDataID rid, VkFormat format);
+
     /// Get the allocation of a resource
     /// \param rid resource identifier
     /// \return given allocation
     VmaAllocation GetMappingAllocation(ShaderDataMappingID rid);
+
+    /// Get the index of a program binding
+    /// @param programID program
+    /// @param rid data id of the binding
+    /// @return index
+    uint32_t GetBindingIndex(ShaderProgramID programID, ShaderDataID rid);
     
     /// Overrides
-    ShaderDataID CreateBuffer(const ShaderDataBufferInfo &info) override;
+    ShaderDataID CreateBuffer(const ShaderDataBufferInfo &info, const char* name) override;
+    ShaderDataID CreateBufferBinding(const ShaderProgramID& program, const ShaderDataBufferBindingInfo& info) override;
     ShaderDataID CreateEventData(const ShaderDataEventInfo &info) override;
     ShaderDataID CreateDescriptorData(const ShaderDataDescriptorInfo &info) override;
     void *Map(ShaderDataID rid) override;
+    void Unmap(ShaderDataID rid, void *mapped) override;
     ShaderDataMappingID CreateMapping(ShaderDataID data, uint64_t tileCount) override;
     void DestroyMapping(ShaderDataMappingID mid) override;
     void FlushMappedRange(ShaderDataID rid, size_t offset, size_t length) override;
     void Destroy(ShaderDataID rid) override;
-    void Enumerate(uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) override;
+    void EnumerateShader(uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) override;
+    void EnumerateProgram(ShaderProgramID programID, uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) override;
     ShaderDataCapabilityTable GetCapabilityTable() override;
 
 private:
@@ -103,11 +119,19 @@ private:
 
         /// Top information
         ShaderDataInfo info;
+
+        /// Is this a host resource?
+        bool isNonDescriptor = false;
     };
 
     struct MappingEntry {
         /// Underlying allocation
         VmaAllocation allocation;
+    };
+
+    struct ProgramEntry {
+        /// All program bindings
+        std::vector<ShaderDataID> shaderDataIDs;
     };
 
 private:
@@ -133,6 +157,9 @@ private:
 
     /// Linear resources
     std::vector<ResourceEntry> resources;
+
+    /// All programs
+    std::map<ShaderProgramID, ProgramEntry> programs;
 
 private:
     /// All free mapping indices

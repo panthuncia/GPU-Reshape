@@ -34,9 +34,11 @@
 #include <Backends/DX12/Symbolizer/ShaderSGUIDHost.h>
 #include <Backends/DX12/CommandList.h>
 #include <Backends/DX12/Compiler/Diagnostic/DiagnosticPrettyPrint.h>
+#include <Backends/DX12/States/StateObjectState.h>
 
 // Backend
 #include <Backend/IFeature.h>
+#include <Backend/IShaderFeature.h>
 
 // Bridge
 #include <Bridge/IBridge.h>
@@ -76,6 +78,13 @@ bool InstrumentationController::Install() {
 
     auto bridge = registry->Get<IBridge>();
     bridge->Register(this);
+
+    // Get the instrumentation bit set
+    for (size_t i = 0; i < device->features.size(); i++) {
+        if (Cast<IShaderFeature>(device->features[i])) {
+            instrumentationFeatureBitSet |= 1ull << i;
+        }
+    }
 
     return true;
 }
@@ -165,6 +174,15 @@ void InstrumentationController::CreatePipelineNoLock(PipelineState *state) {
 void InstrumentationController::PropagateInstrumentationInfo(PipelineState *state) {
     state->instrumentationInfo.featureBitSet = 0x0;
     state->instrumentationInfo.specialization.Clear();
+
+    if (!state->supportsInstrumentation) {
+        state->instrumentationInfo.specializationHash = 0;
+        state->dependentInstrumentationInfo.specializations.resize(state->shaders.size());
+        for (MessageStream& dependentStream : state->dependentInstrumentationInfo.specializations) {
+            dependentStream.ClearWithSchemaInvalidate();
+        }
+        return;
+    }
 
     // Append global
     state->instrumentationInfo.featureBitSet |= globalInstrumentationInfo.featureBitSet;
@@ -328,7 +346,7 @@ void InstrumentationController::OnMessage(const ConstMessageStreamView<>::ConstI
 
             // Validate
             if (!virtualFeatureRedirects[message->index]) {
-                device->logBuffer.Add("DX12", LogSeverity::Error, Format("Virtual redirect failed for feature \"{}\"", message->name.View()));
+                device->logBuffer->Add("DX12", LogSeverity::Error, Format("Virtual redirect failed for feature \"{}\"", message->name.View()));
             }
             break;
         }
@@ -526,6 +544,9 @@ void InstrumentationController::OnMessage(const ConstMessageStreamView<>::ConstI
                 case 2:
                     it->type = PipelineType::Compute;
                     break;
+                case 3:
+                    it->type = PipelineType::StateObject;
+                    break;
             }
 
             // Copy info
@@ -617,6 +638,9 @@ void InstrumentationController::OnStateRequest(const struct GetStateMessage &mes
                     case PipelineType::Compute:
                         response->type = 2;
                         break;
+                    case PipelineType::StateObject:
+                        response->type = 3;
+                        break;
                 }
             }
             break;
@@ -637,7 +661,7 @@ void InstrumentationController::SetInstrumentationInfo(InstrumentationInfo &info
             if (physical) {
                 info.featureBitSet |= physical;
             } else {
-                device->logBuffer.Add("DX12", LogSeverity::Error, Format("Unknown virtual redirect at {}", index));
+                device->logBuffer->Add("DX12", LogSeverity::Error, Format("Unknown virtual redirect at {}", index));
             }
 
             // Next!
@@ -707,7 +731,7 @@ void InstrumentationController::CommitInstrumentation() {
 
     // Diagnostic
 #if LOG_INSTRUMENTATION
-    device->logBuffer.Add("DX12", LogSeverity::Info, Format(
+    device->logBuffer->Add("DX12", LogSeverity::Info, Format(
         "Committing {} unique shaders and {} pipelines for instrumentation",
         immediateBatch.dirtyShaders.size(),
         immediateBatch.dirtyPipelines.size()
@@ -735,7 +759,7 @@ void InstrumentationController::CommitInstrumentation() {
 
     // Warn the user of invalid configurations
     if (D3D12GPUOpenProcessInfo.isDXBCConversionEnabled && !D3D12GPUOpenProcessInfo.isExperimentalShaderModelsEnabled) {
-        device->logBuffer.Add("DX12", LogSeverity::Error, "(DXBC) IL Conversion requires (Windows) Developer Mode to be enabled for signing bypass");
+        device->logBuffer->Add("DX12", LogSeverity::Error, "(DXBC) IL Conversion requires (Windows) Developer Mode to be enabled for signing bypass");
     }
 
     // Task group
@@ -822,6 +846,7 @@ static uint32_t GetPipelineSlot(const PipelineState* state) {
         case PipelineType::Graphics:
             return static_cast<uint32_t>(PipelineType::GraphicsSlot);
         case PipelineType::Compute:
+        case PipelineType::StateObject:
             return static_cast<uint32_t>(PipelineType::ComputeSlot);
         default:
             ASSERT(false, "Invalid type");
@@ -849,6 +874,9 @@ void InstrumentationController::CommitShaders(DispatcherBucket *bucket, void *da
             // Get the super feature set
             uint64_t featureBitSet = shaderFeatureBitSet | dependentObject->instrumentationInfo.featureBitSet;
 
+            // Mark by instrumentation set
+            featureBitSet &= instrumentationFeatureBitSet;
+
             // No features?
             if (!featureBitSet) {
                 continue;
@@ -868,24 +896,72 @@ void InstrumentationController::CommitShaders(DispatcherBucket *bucket, void *da
             CombineHash(instrumentationKey.combinedHash, state->instrumentationInfo.specializationHash);
             CombineHash(instrumentationKey.combinedHash, dependentObject->signature->physicalMapping->signatureHash);
 
-            // Attempt to reserve
-            if (!state->Reserve(instrumentationKey)) {
-                continue;
+            // All keys to append
+            TrivialStackVector<ShaderInstrumentationKey, 4u> keys;
+
+            // Shader may occur with different local root signatures in a state object
+            if (dependentObject->type == PipelineType::StateObject) {
+                auto stateObjectState = static_cast<StateObjectState*>(dependentObject);
+
+                // TODO[rt]: Let's not do a linear search...
+                for (const StateShaderSubObject& subObject : stateObjectState->shaderSubObjects) {
+                    if (subObject.shader != state) {
+                        continue;
+                    }
+
+                    // Append the local keys
+                    ShaderInstrumentationKey subObjectKey = instrumentationKey;
+                    subObjectKey.localKeyCount = static_cast<uint32_t>(subObject.functionExports.size());
+                    subObjectKey.localKeys = new (allocators) ShaderLocalInstrumentationKey[subObject.functionExports.size()];
+
+                    for (uint32_t exportIndex = 0; exportIndex < subObject.functionExports.size(); exportIndex++) {
+                        const StateShaderSubObjectExport& _export = subObject.functionExports[exportIndex];
+
+                        // Setup local key
+                        ShaderLocalInstrumentationKey& localKey = subObjectKey.localKeys[exportIndex];
+                        localKey.mangledName = _export.dxbc.function.mangledName;
+
+                        // Local signatures are optional
+                        if (_export.localSignature) {
+                            localKey.localPhysicalMapping = _export.localSignature->physicalMapping;
+
+                            // There is a single, register wise, binding group for the local root signature data
+                            // While the actual mappings may be different for each export, the actual binding info must be the same
+                            subObjectKey.bindingInfo.local = _export.localSignature->rootBindingInfo.local;
+
+                            // Combine hashes
+                            CombineHash(subObjectKey.combinedHash, localKey.localPhysicalMapping->signatureHash);
+                        }
+                    }
+
+                    // Add for compilation
+                    keys.Add(subObjectKey);
+                }
+            } else {
+                keys.Add(instrumentationKey);
             }
 
-            // Increment counter
-            batch->stageCounters[GetPipelineSlot(dependentObject)]++;
+            // Push all jobs
+            for (const ShaderInstrumentationKey& key : keys) {
+                // Attempt to reserve
+                if (!state->Reserve(key)) {
+                    continue;
+                }
 
-            // Determine the shader module index within the dependent object
-            uint64_t dependentIndex = std::ranges::find(dependentObject->shaders, state) - dependentObject->shaders.begin();
+                // Increment counter
+                batch->stageCounters[GetPipelineSlot(dependentObject)]++;
 
-            // Inject the feedback state
-            shaderCompiler->Add(ShaderJob {
-                .state = state,
-                .instrumentationKey = instrumentationKey,
-                .diagnostic = &batch->shaderCompilerDiagnostic,
-                .dependentSpecialization = &dependentObject->dependentInstrumentationInfo.specializations[dependentIndex]
-            }, bucket);
+                // Determine the shader module index within the dependent object
+                uint64_t dependentIndex = std::ranges::find(dependentObject->shaders, state) - dependentObject->shaders.begin();
+
+                // Inject the feedback state
+                shaderCompiler->Add(ShaderJob {
+                    .state = state,
+                    .instrumentationKey = key,
+                    .diagnostic = &batch->shaderCompilerDiagnostic,
+                    .dependentSpecialization = &dependentObject->dependentInstrumentationInfo.specializations[dependentIndex],
+                }, bucket);
+            } 
         }
     }
 }
@@ -920,10 +996,11 @@ void InstrumentationController::CommitPipelines(DispatcherBucket* bucket, void *
         // Setup the job
         PipelineJob& job = jobs[enqueuedJobs];
         job.state = state;
+        job.keyCount = static_cast<uint32_t>(state->shaders.size());
         job.combinedHash = 0x0;
 
-        // Allocate feature bit sets
-        job.shaderInstrumentationKeys = new (registry->GetAllocators(), kAllocInstrumentation) ShaderInstrumentationKey[state->shaders.size()];
+        // Allocate instrumentation keys
+        job.shaderInstrumentationKeys = new (registry->GetAllocators(), kAllocInstrumentation) PipelineJobKey[job.keyCount];
 
         // Super set
         uint64_t superFeatureBitSet{0};
@@ -940,31 +1017,38 @@ void InstrumentationController::CommitPipelines(DispatcherBucket* bucket, void *
             featureBitSet |= shaderState->instrumentationInfo.featureBitSet;
             featureBitSet |= state->instrumentationInfo.featureBitSet;
 
+            // Mark by instrumentation set
+            featureBitSet &= instrumentationFeatureBitSet;
+
             // Summarize
             superFeatureBitSet |= featureBitSet;
-
-            // Number root info
-            const RootRegisterBindingInfo& signatureBindingInfo = state->signature->rootBindingInfo;
 
             // Create the instrumentation key
             ShaderInstrumentationKey instrumentationKey{};
             instrumentationKey.featureBitSet = featureBitSet;
             instrumentationKey.physicalMapping = state->signature->physicalMapping;
-            instrumentationKey.bindingInfo = signatureBindingInfo;
 
             // Combine hashes
             instrumentationKey.combinedHash = state->instrumentationInfo.specializationHash;
             CombineHash(instrumentationKey.combinedHash, shaderState->instrumentationInfo.specializationHash);
             CombineHash(instrumentationKey.combinedHash, state->signature->physicalMapping->signatureHash);
 
+            // Setup compilation key
+            PipelineJobKey pipelineKey{};
+            pipelineKey.shaderKey = instrumentationKey;
+            pipelineKey.shader = shaderState;
+
             // Assign key
-            job.shaderInstrumentationKeys[shaderIndex] = instrumentationKey;
+            // Note: The local root signatures are not appended here, but in the pipeline compiler during lookup
+            // It's easier to do the one-to-many mapping there instead of here, and is redundant, for now at least.
+            job.shaderInstrumentationKeys[shaderIndex] = pipelineKey;
 
             // Combine parent hash
             CombineHash(job.combinedHash, instrumentationKey.combinedHash);
             
             // Shader may have failed to compile for whatever reason, skip if need be
-            if (!shaderState->HasInstrument(instrumentationKey)) {
+            // Note: State objects are exempt due to LRS hashing
+            if (state->type != PipelineType::StateObject && !shaderState->HasInstrument(instrumentationKey)) {
                 rejectedKeys.push_back(std::make_pair(shaderState, instrumentationKey));
                 isSkipped = true;
             }
@@ -972,6 +1056,11 @@ void InstrumentationController::CommitPipelines(DispatcherBucket* bucket, void *
 
         // No features?
         if (!superFeatureBitSet) {
+            // If a state object, set the patch table to native
+            if (auto* stateObject = static_cast<StateObjectState*>(state); state->type == PipelineType::StateObject) {
+                stateObject->hotSwapPatchTable.store(nullptr);
+            }
+            
             // Set the hot swapped object to native
             state->hotSwapObject.store(nullptr);
             isSkipped = true;
@@ -1007,11 +1096,11 @@ void InstrumentationController::CommitPipelines(DispatcherBucket* bucket, void *
 
         // Compose keys
         for (auto&& kv : rejectedKeys) {
-            keyMessage << "\tShader " << kv.first->uid << " [" << kv.second.featureBitSet << "] with {s" << kv.second.bindingInfo.space << "} root binding\n";
+            keyMessage << "\tShader " << kv.first->uid << " [" << kv.second.featureBitSet << "] with {s" << kv.second.bindingInfo.global.space << "} root binding\n";
         }
 
         // Submit
-        device->logBuffer.Add("DX12", LogSeverity::Error, keyMessage.str());
+        device->logBuffer->Add("DX12", LogSeverity::Error, keyMessage.str());
 #endif // LOG_REJECTED_KEYS
     }
 
@@ -1036,7 +1125,12 @@ void InstrumentationController::CommitTable(DispatcherBucket* bucket, void *data
 
     // Commit all pending entries
     for (Batch::CommitEntry entry : batch->commitEntries) {
-        if (auto pipeline = entry.state->GetInstrument(entry.combinedHash)) {
+        if (PipelineInstrument *pipeline = entry.state->GetInstrument(entry.combinedHash)) {
+            // If a state object, replace the patch table
+            if (auto* stateObject = static_cast<StateObjectState*>(entry.state); entry.state->type == PipelineType::StateObject) {
+                stateObject->hotSwapPatchTable.store(stateObject->GetPatch(entry.combinedHash));
+            }
+            
             entry.state->hotSwapObject.store(pipeline);
         }
     }

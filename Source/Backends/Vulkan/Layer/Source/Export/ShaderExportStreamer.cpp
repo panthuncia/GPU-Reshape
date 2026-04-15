@@ -45,6 +45,9 @@
 #include <Backends/Vulkan/Resource/PushDescriptorAppendAllocator.h>
 #include <Backends/Vulkan/Resource/PhysicalResourceMappingTablePersistentVersion.h>
 
+// Backend
+#include <Backend/IL/Execution/ExecutionInfo.h>
+
 // Bridge
 #include <Bridge/IBridge.h>
 
@@ -56,7 +59,17 @@
 #include <Common/Registry.h>
 #include <Backends/Vulkan/Translation.h>
 
-ShaderExportStreamer::ShaderExportStreamer(DeviceDispatchTable *table) : table(table), dynamicOffsetAllocator(table->allocators) {
+// System
+#if defined(_MSC_VER)
+#   include <Windows.h>
+#   undef min
+#   undef max
+#endif // _MSC_VER
+
+ShaderExportStreamer::ShaderExportStreamer(DeviceDispatchTable *table) :
+    table(table),
+    dynamicOffsetAllocator(table->allocators),
+    freeDescriptorAllocator(table) {
 
 }
 
@@ -96,6 +109,18 @@ ShaderExportStreamer::~ShaderExportStreamer() {
         table->next_vkDestroyBuffer(table->object, state->constantShaderDataBuffer.buffer, nullptr);
         deviceAllocator->Free(state->constantShaderDataBuffer.allocation);
     }
+
+    // Free all descriptor data segments
+    for (const DescriptorDataSegmentEntry& entry : freeDescriptorDataSegmentEntries) {
+        table->deviceAllocator->Free(entry.allocation);
+    }
+
+    // Free all constant allocators
+    for (const ShaderExportConstantAllocator& allocator : freeConstantAllocators) {
+        for (const ShaderExportConstantSegment& staging : allocator.staging) {
+            table->deviceAllocator->Free(staging.allocation);
+        }
+    }
 }
 
 ShaderExportQueueState *ShaderExportStreamer::AllocateQueueState(QueueState* queue) {
@@ -124,6 +149,9 @@ ShaderExportStreamState *ShaderExportStreamer::AllocateStreamState() {
 
     // Create the constants data buffer
     state->constantShaderDataBuffer = table->dataHost->CreateConstantDataBuffer();
+
+    // Set shared allocators
+    state->freeDescriptorAllocator.allocator = &freeDescriptorAllocator;
 
     // Create descriptor data allocator
     for (uint32_t i = 0; i < static_cast<uint32_t>(PipelineType::Count); i++) {
@@ -202,14 +230,14 @@ void ShaderExportStreamer::BeginCommandBuffer(ShaderExportStreamState* state, Vk
     std::lock_guard guard(mutex);
 
     for (ShaderExportPipelineBindState& bindState : state->pipelineBindPoints) {
-        bindState.persistentDescriptorState.resize(table->physicalDeviceProperties.limits.maxBoundDescriptorSets);
+        bindState.persistentDescriptorState.resize(table->physicalDeviceProperties.properties.limits.maxBoundDescriptorSets);
         std::fill(bindState.persistentDescriptorState.begin(), bindState.persistentDescriptorState.end(), ShaderExportDescriptorState());
 
         // Reset state
         bindState.deviceDescriptorOverwriteMask = 0x0;
         bindState.pipeline = nullptr;
         bindState.pipelineObject = nullptr;
-        bindState.isInstrumented = false;
+        bindState.pipelineInstrument = nullptr;
     }
 
     // Reset render pass state
@@ -219,7 +247,7 @@ void ShaderExportStreamer::BeginCommandBuffer(ShaderExportStreamState* state, Vk
     state->pending = true;
 
     // Clear push data
-    state->persistentPushConstantData.resize(table->physicalDeviceProperties.limits.maxPushConstantsSize);
+    state->persistentPushConstantData.resize(table->physicalDeviceProperties.properties.limits.maxPushConstantsSize);
     std::fill(state->persistentPushConstantData.begin(), state->persistentPushConstantData.end(), 0u);
 
     // Initialize descriptor binders
@@ -250,10 +278,27 @@ void ShaderExportStreamer::BeginCommandBuffer(ShaderExportStreamState* state, Vk
         // Set current for successive binds
         bindState.currentSegment = allocation;
     }
+
+    // Pop constant allocator if available
+    if (!freeConstantAllocators.empty()) {
+        state->constantAllocator = freeConstantAllocators.back();
+        freeConstantAllocators.pop_back();
+    }
+
+    // Pop device allocator if available
+    if (!freeDeviceAllocators.empty()) {
+        state->deviceAllocator = freeDeviceAllocators.back();
+        freeDeviceAllocators.pop_back();
+    }
 }
 
 void ShaderExportStreamer::ResetCommandBuffer(ShaderExportStreamState *state) {
     std::lock_guard guard(mutex);
+
+#ifndef NDEBUG
+    // Process debugging streams
+    ProcessStreamDebug(state);
+#endif // NDEBUG
 
     // Release all bind points
     for (ShaderExportPipelineBindState& bindState : state->pipelineBindPoints) {
@@ -276,7 +321,7 @@ void ShaderExportStreamer::ResetCommandBuffer(ShaderExportStreamState *state) {
         }
 
         // Reset descriptor state
-        bindState.persistentDescriptorState.resize(table->physicalDeviceProperties.limits.maxBoundDescriptorSets);
+        bindState.persistentDescriptorState.resize(table->physicalDeviceProperties.properties.limits.maxBoundDescriptorSets);
         std::fill(bindState.persistentDescriptorState.begin(), bindState.persistentDescriptorState.end(), ShaderExportDescriptorState());
         bindState.deviceDescriptorOverwriteMask = 0x0;
     }
@@ -285,9 +330,20 @@ void ShaderExportStreamer::ResetCommandBuffer(ShaderExportStreamState *state) {
     for (const ShaderExportSegmentDescriptorAllocation& allocation : state->segmentDescriptors) {
         descriptorAllocator->Free(allocation.info);
     }
+
+    // Move constant allocator to the segment
+    if (!state->constantAllocator.staging.empty()) {
+        FreeConstantAllocator(state->constantAllocator);
+    }
+
+    // Recycle the device allocator
+    FreeDeviceAllocator(state->deviceAllocator);
+
+    // Free shared allocations
+    state->freeDescriptorAllocator.Reset();
     
     // Clear push data
-    state->persistentPushConstantData.resize(table->physicalDeviceProperties.limits.maxPushConstantsSize);
+    state->persistentPushConstantData.resize(table->physicalDeviceProperties.properties.limits.maxPushConstantsSize);
     std::fill(state->persistentPushConstantData.begin(), state->persistentPushConstantData.end(), 0u);
 
     // Cleanup
@@ -319,7 +375,7 @@ void ShaderExportStreamer::EndCommandBuffer(ShaderExportStreamState* state, VkCo
     }
 }
 
-void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const PipelineState *pipeline, VkPipeline object, bool instrumented, VkCommandBuffer commandBuffer) {
+void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const PipelineState *pipeline, VkPipeline object, PipelineInstrument* instrument, VkCommandBuffer commandBuffer) {
     // Get bind state
     ShaderExportPipelineBindState& bindState = state->pipelineBindPoints[static_cast<uint32_t>(pipeline->type)];
 
@@ -329,7 +385,10 @@ void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const Pi
     // Needs reconstruction of the descriptor segment?
     if (pipeline != bindState.pipeline || pipeline->layout->compatabilityHash != bindState.pipeline->layout->compatabilityHash) {
         // Begin new descriptor segment
-        bindState.descriptorDataAllocator->BeginSegment(pipeline->layout->boundUserDescriptorStates * kDescriptorDataDWordCount, false);
+        bindState.descriptorDataAllocator->BeginSegment(pipeline->layout->physicalMapping.descriptorDataControl.dwordCount, false);
+
+        // Set the control header
+        bindState.descriptorDataAllocator->Set(commandBuffer, 0, pipeline->layout->physicalMapping.descriptorDataControl.header);
 
         // Setup new segment
         for (size_t i = 0; i < pipeline->layout->compatabilityHashes.size(); i++) {
@@ -345,7 +404,7 @@ void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const Pi
 
             // Mismatched compatability?
             if (pipeline->layout->compatabilityHashes[i] != descriptorState.compatabilityHash) {
-                bindState.descriptorDataAllocator->Set(commandBuffer, descriptorDWordOffset + kDescriptorDataOffsetDWord, 0x0);
+                bindState.descriptorDataAllocator->Set(commandBuffer, DescriptorDataControl::GetRootDWordOffset(descriptorDWordOffset + kDescriptorDataOffsetDWord), 0x0);
                 continue;
             }
         
@@ -356,8 +415,8 @@ void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const Pi
             PhysicalResourceMappingTableSegment segment = table->prmTable->GetSegmentShader(persistentState->segmentID);
 
             // Set offset and length
-            bindState.descriptorDataAllocator->Set(commandBuffer, descriptorDWordOffset + kDescriptorDataOffsetDWord, segment.offset);
-            bindState.descriptorDataAllocator->Set(commandBuffer, descriptorDWordOffset + kDescriptorDataLengthDWord, segment.length);
+            bindState.descriptorDataAllocator->Set(commandBuffer, DescriptorDataControl::GetRootDWordOffset(descriptorDWordOffset + kDescriptorDataOffsetDWord), segment.offset);
+            bindState.descriptorDataAllocator->Set(commandBuffer, DescriptorDataControl::GetRootDWordOffset(descriptorDWordOffset + kDescriptorDataLengthDWord), segment.length);
         }
 
         // As the bindings have been (potentially) invalidated, we must roll the chunk
@@ -367,10 +426,10 @@ void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const Pi
     // State tracking
     bindState.pipeline = pipeline;
     bindState.pipelineObject = object;
-    bindState.isInstrumented = instrumented;
+    bindState.pipelineInstrument = instrument;
 
     // Ensure the shader export states are bound
-    if (instrumented) {
+    if (instrument) {
         // Set export set
         BindShaderExport(state, pipeline, commandBuffer);
     }
@@ -420,6 +479,50 @@ void ShaderExportStreamer::Process(ShaderExportQueueState* queueState) {
             proxyTable.join.TryInvoke(handle);
         }
     }
+}
+
+#ifndef NDEBUG
+void ShaderExportStreamer::ProcessStreamDebug(ShaderExportStreamState* state) {
+    if (state->debugStreams.empty()) {
+        return;
+    }
+
+    // Always serial
+    static std::mutex mutex;
+    std::lock_guard guard(mutex);
+    
+    for (const ShaderExportStreamStateDebugStream& stream : state->debugStreams) {
+        // For now, treat it all as dwords
+        const auto* dwords = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(stream.mappedData) + stream.offset);
+
+        std::stringstream ss;
+        ss << "Debug Stream '" << stream.name << "':\n";
+
+        // Dump all dwords
+        for (uint32_t i = 0; i < stream.length / sizeof(uint32_t); i++) {
+            ss << "\t [" << i << "] " << dwords[i] << "\n";
+        }
+
+        // TODO[rt]: Non MSVC printing
+        OutputDebugStringA(ss.str().c_str());
+    }
+
+    // Cleanup
+    state->debugStreams.clear();
+}
+#endif // NDEBUG
+
+void ShaderExportStreamer::SetExecutionInfo(ShaderExportStreamState *state, VkCommandBuffer commandBuffer, PipelineType type, const ExecutionInfo &executionInfo) {
+    ShaderExportPipelineBindState& bindState = state->pipelineBindPoints[static_cast<uint32_t>(type)];
+
+    // Append the execution info data
+    bindState.descriptorDataAllocator->SetOrAllocate(
+        commandBuffer,
+        bindState.pipeline->layout->physicalMapping.descriptorDataControl.header.executionDWordOffset,
+        bindState.pipeline->layout->physicalMapping.descriptorDataControl.dwordCount,
+        executionInfo,
+        true
+    );
 }
 
 void ShaderExportStreamer::Commit(ShaderExportStreamState *state, VkPipelineBindPoint bindPoint, VkCommandBuffer commandBuffer) {
@@ -494,7 +597,7 @@ void ShaderExportStreamer::Commit(ShaderExportStreamState *state, VkPipelineBind
     }
 
     // Begin new segment
-    bindState.descriptorDataAllocator->BeginSegment(bindState.pipeline->layout->boundUserDescriptorStates * kDescriptorDataDWordCount, true);
+    bindState.descriptorDataAllocator->BeginSegment(bindState.pipeline->layout->physicalMapping.descriptorDataControl.dwordCount, true);
 }
 
 void ShaderExportStreamer::MigrateDescriptorEnvironment(ShaderExportStreamState *state, const PipelineState *pipeline, VkCommandBuffer commandBuffer) {
@@ -648,9 +751,10 @@ void ShaderExportStreamer::MapSegment(ShaderExportStreamState *state, ShaderExpo
         descriptorAllocator->Update(allocation.info, segment->allocation, segment->prmtPersistentVersion);
     }
 
-    // Add context handle
-    ASSERT(state->commandContextHandle != kInvalidCommandContextHandle, "Unmapped command context handle");
-    segment->commandContextHandles.push_back(state->commandContextHandle);
+    // Add context handle, may be unmapped on user contexts
+    if (state->commandContextHandle != kInvalidCommandContextHandle) {
+        segment->commandContextHandles.push_back(state->commandContextHandle);
+    }
 }
 
 void ShaderExportStreamer::ProcessSegmentsNoQueueLock(ShaderExportQueueState* queue, TrivialStackVector<CommandContextHandle, 32u>& completedHandles) {
@@ -678,7 +782,8 @@ bool ShaderExportStreamer::ProcessSegment(ShaderExportStreamSegment *segment, Tr
         return false;
     }
 
-    // Output for messages
+    // Streams for messages
+    IMessageStorage* input = bridge->GetInput();
     IMessageStorage* output = bridge->GetOutput();
 
     // Map the counters
@@ -695,6 +800,11 @@ bool ShaderExportStreamer::ProcessSegment(ShaderExportStreamSegment *segment, Tr
         // Limit the counter by the physical size of the buffer (may exceed)
         elementCount = std::min(elementCount, static_cast<uint32_t>(streamInfo.byteSize / streamInfo.typeInfo.typeSize));
 
+        // No data, no stream
+        if (!elementCount) {
+            continue;
+        }
+        
         // Map the stream
         auto* stream = static_cast<uint8_t*>(deviceAllocator->Map(streamInfo.allocation.host));
 
@@ -707,8 +817,15 @@ bool ShaderExportStreamer::ProcessSegment(ShaderExportStreamSegment *segment, Tr
         messageStream.SetVersionID(segment->versionSegPoint.id);
         messageStream.SetData(stream, size, static_cast<uint32_t>(size / streamInfo.typeInfo.typeSize));
 
+        // Add input
+        if (streamInfo.typeInfo.streamType & ShaderExportStreamType::Input) {
+            input->AddStream(messageStream);
+        }
+        
         // Add output
-        output->AddStream(messageStream);
+        if (streamInfo.typeInfo.streamType & ShaderExportStreamType::Output) {
+            output->AddStream(messageStream);
+        }
 
         // Unmap
         deviceAllocator->Unmap(streamInfo.allocation.host);
@@ -728,6 +845,54 @@ bool ShaderExportStreamer::ProcessSegment(ShaderExportStreamSegment *segment, Tr
 
     // Done!
     return true;
+}
+
+void ShaderExportStreamer::FreeConstantAllocator(ShaderExportConstantAllocator& allocator) {
+    static constexpr size_t kLargeConstantThreshold = 64'000;
+    
+    // Cleanup the staging data
+    if (!allocator.staging.empty()) {
+        size_t trimCount = allocator.staging.size();
+
+        // If we're below the threshold, keep the last chunk
+        // Large chunks can easily accumulate as they're swapped between different streaming state
+        if (allocator.staging.back().size < kLargeConstantThreshold) {
+            trimCount--;
+        }
+        
+        // Free all staging allocations except the last
+        for (size_t i = 0; i < trimCount; i++) {
+            table->deviceAllocator->Free(allocator.staging[i].allocation);
+        }
+
+        // Remove all but the last
+        allocator.staging.erase(allocator.staging.begin(), allocator.staging.begin() + trimCount);
+
+        // Reset head counter
+        if (!allocator.staging.empty()) {
+            allocator.staging.back().head = 0;
+        }
+    }
+
+    // Add to free pool
+    freeConstantAllocators.push_back(allocator);
+
+    // Erase local state
+    allocator.staging.clear();
+}
+
+void ShaderExportStreamer::FreeDeviceAllocator(ShaderExportDeviceAllocator &allocator) {
+    // Free all lazy allocations
+    allocator.LazyFree();
+
+    // Update for the sake of good measure
+    allocator.Update(deviceAllocator);
+
+    // To the pool
+    freeDeviceAllocators.push_back(allocator);
+
+    // Cleanup
+    allocator.Clear();
 }
 
 void ShaderExportStreamer::FreeSegmentNoQueueLock(ShaderExportQueueState* queue, ShaderExportStreamSegment *segment) {
@@ -831,7 +996,7 @@ VkCommandBuffer ShaderExportStreamer::RecordPreCommandBuffer(ShaderExportQueueSt
     return segment->prePatchCommandBuffer;
 }
 
-VkCommandBuffer ShaderExportStreamer::RecordPostCommandBuffer(ShaderExportQueueState* state, ShaderExportStreamSegment* segment) {
+VkCommandBuffer ShaderExportStreamer::BeginRecordPostCommandBuffer(ShaderExportQueueState* state, ShaderExportStreamSegment* segment) {
     std::lock_guard guard(mutex);
 
     // Get queue
@@ -849,6 +1014,16 @@ VkCommandBuffer ShaderExportStreamer::RecordPostCommandBuffer(ShaderExportQueueS
         return nullptr;
     }
 
+    // OK
+    return segment->postPatchCommandBuffer;
+}
+
+void ShaderExportStreamer::EndRecordPostCommandBuffer(ShaderExportQueueState *state, ShaderExportStreamSegment *segment) {
+    std::lock_guard guard(mutex);
+
+    // Get queue
+    QueueState* queueState = table->states_queue.Get(state->queue);
+    
     // Counter to be copied
     const ShaderExportSegmentCounterInfo& counter = segment->allocation->counter;
 
@@ -893,9 +1068,6 @@ VkCommandBuffer ShaderExportStreamer::RecordPostCommandBuffer(ShaderExportQueueS
             0, nullptr,
             0, nullptr
     );
-    
-    // OK
-    return segment->postPatchCommandBuffer;
 }
 
 void ShaderExportStreamer::BindDescriptorSets(ShaderExportStreamState* state, VkPipelineBindPoint bindPoint, VkPipelineLayout layout, uint32_t start, uint32_t count, const VkDescriptorSet* sets, uint32_t dynamicOffsetCount, const uint32_t* pDynamicOffsets, VkCommandBuffer commandBuffer) {
@@ -925,12 +1097,12 @@ void ShaderExportStreamer::BindDescriptorSets(ShaderExportStreamState* state, Vk
 
         // Descriptor data
         const uint32_t descriptorDataDWordOffset = slot * kDescriptorDataDWordCount;
-        const uint32_t descriptorDataDWordBound  = layoutState->boundUserDescriptorStates * kDescriptorDataDWordCount;
+        const uint32_t descriptorDataDWordBound  = DescriptorDataHeaderDWordCount + layoutState->boundUserDescriptorStates * kDescriptorDataDWordCount;
 
         // Set the shader PRMT offset, roll the chunk if needed (only initial set needs to roll)
         PhysicalResourceMappingTableSegment segment = table->prmTable->GetSegmentShader(persistentState->segmentID);
-        bindState.descriptorDataAllocator->SetOrAllocate(commandBuffer, descriptorDataDWordOffset + kDescriptorDataLengthDWord, descriptorDataDWordBound, segment.length);
-        bindState.descriptorDataAllocator->Set(commandBuffer, descriptorDataDWordOffset + kDescriptorDataOffsetDWord, segment.offset);
+        bindState.descriptorDataAllocator->SetOrAllocate(commandBuffer, DescriptorDataControl::GetRootDWordOffset(descriptorDataDWordOffset + kDescriptorDataLengthDWord), descriptorDataDWordBound, segment.length);
+        bindState.descriptorDataAllocator->Set(commandBuffer, DescriptorDataControl::GetRootDWordOffset(descriptorDataDWordOffset + kDescriptorDataOffsetDWord), segment.offset);
 
         // Number of dynamic counts for this slot
         uint32_t slotDynamicCount = layoutState->descriptorDynamicOffsets.at(slot);

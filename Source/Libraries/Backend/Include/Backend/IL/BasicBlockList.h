@@ -34,6 +34,9 @@
 #include "BasicBlock.h"
 
 namespace IL {
+    /// Forward declarations
+    struct Function;
+    
     struct BasicBlockList {
         using Container = std::vector<BasicBlock*>;
 
@@ -49,20 +52,26 @@ namespace IL {
         }
 
         /// Allocate a new basic block
+        /// \param name optional name
         /// \return allocated basic block
-        BasicBlock* AllocBlock(ID bid) {
+        BasicBlock* AllocBlock(ID bid, const char* name = nullptr) {
             revision++;
 
             auto* basicBlock = new (allocators) BasicBlock(allocators, map, bid);
+            basicBlock->SetName(name);
+            
             basicBlocks.push_back(basicBlock);
             basicBlockMap[bid] = basicBlock;
+
+            basicBlock->SetFunction(function);
             return basicBlock;
         }
 
         /// Allocate a new basic block
+        /// \param name optional name
         /// \return allocated basic block
-        BasicBlock* AllocBlock() {
-            return AllocBlock(map.AllocID());
+        BasicBlock* AllocBlock(const char* name = nullptr) {
+            return AllocBlock(map.AllocID(), name);
         }
 
         /// Get a block from an identifier
@@ -87,6 +96,9 @@ namespace IL {
         void Remove(BasicBlock* block) {
             basicBlockMap.erase(block->GetID());
 
+            // Remove reference
+            block->SetFunction(nullptr);
+
             // Note: Removing by value is somewhat acceptable, we are not expecting large amounts of blocks
             basicBlocks.erase(std::find(basicBlocks.begin(), basicBlocks.end(), block));
         }
@@ -96,6 +108,9 @@ namespace IL {
         void Add(BasicBlock* block) {
             basicBlocks.push_back(block);
             basicBlockMap[block->GetID()] = block;
+
+            // Add reference
+            block->SetFunction(function);
         }
 
         /// Rename an existing block
@@ -146,6 +161,9 @@ namespace IL {
             // Copy all basic blocks
             for (const BasicBlock* bb : basicBlocks) {
                 auto* copy = new (allocators) BasicBlock(allocators, out.map, bb->GetID());
+                copy->SetFunction(out.function);
+
+                // Copy all instructions
                 bb->CopyTo(copy);
 
                 out.basicBlocks.push_back(copy);
@@ -156,6 +174,16 @@ namespace IL {
         /// Get the entry point block
         IL::BasicBlock* GetEntryPoint() const {
             return basicBlocks[0];
+        }
+
+        /// Set the owning function
+        void SetFunction(Function* value) {
+            function = value;
+        }
+
+        /// Get the function this block resides in
+        Function* GetFunction() const {
+            return function;
         }
 
         /// Iterator accessors
@@ -180,6 +208,9 @@ namespace IL {
         /// Block map
         std::unordered_map<ID, BasicBlock*> basicBlockMap;
 
+        /// Owning function
+        Function* function{nullptr};
+        
         /// Basic block revision
         uint32_t revision{0};
     };

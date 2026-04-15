@@ -25,16 +25,19 @@
 // 
 
 using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
+using DynamicData;
 using DynamicData.Binding;
 using ReactiveUI;
+using Runtime.ViewModels.IL;
 using Runtime.ViewModels.Shader;
+using Runtime.ViewModels.Traits;
 using Studio.Models.Workspace.Objects;
 
 namespace Studio.ViewModels.Workspace.Objects
 {
-    public class ShaderViewModel : ReactiveObject
+    public class ShaderViewModel : ReactiveObject, ISerializable
     {
         /// <summary>
         /// Shader GUID
@@ -78,9 +81,18 @@ namespace Studio.ViewModels.Workspace.Objects
         }
 
         /// <summary>
+        /// Is this shader optimized?
+        /// </summary>
+        public bool IsOptimized
+        {
+            get => _isOptimized;
+            set => this.RaiseAndSetIfChanged(ref _isOptimized, value);
+        }
+
+        /// <summary>
         /// Current asynchronous status
         /// </summary>
-        public AsyncShaderStatus AsyncStatus
+        public AsyncObjectStatus AsyncStatus
         {
             get => _asyncStatus;
             set => this.RaiseAndSetIfChanged(ref _asyncStatus, value);
@@ -96,25 +108,34 @@ namespace Studio.ViewModels.Workspace.Objects
         /// </summary>
         public ObservableCollectionExtended<ShaderFileViewModel> FileViewModels { get; } = new();
 
-        /// <summary>
-        /// Add a new validation object to this shader
-        /// </summary>
-        /// <param name="key"></param>
-        /// <param name="validationObject"></param>
-        public void AddValidationObject(uint key, ValidationObject validationObject)
+        public ShaderViewModel()
         {
-            _reducedValidationObjects.Add(key, validationObject);
+            // TODO: I hate this
+            ValidationObjects
+                .ToObservableChangeSet()
+                .OnItemAdded(x => x.ShaderViewModel = this)
+                .Subscribe();
         }
 
         /// <summary>
-        /// Get a validation object from this shader
+        /// Serialize this object
         /// </summary>
-        /// <param name="key"></param>
-        /// <returns>null if not found</returns>
-        public ValidationObject? GetValidationObject(uint key)
+        public object Serialize()
         {
-            _reducedValidationObjects.TryGetValue(key, out ValidationObject? validationObject);
-            return validationObject;
+            SerializationMap map = new()
+            {
+                { "GUID", GUID },
+                { "Filename", Filename },
+                { "AsyncStatus", Enum.GetName(AsyncStatus) },
+                { "Files", FileViewModels.Select(x => x.Serialize()).ToArray() }
+            };
+
+            if (Program != null)
+            {
+                map.Add("Program", new Assembler(Program).Assemble());
+            }
+
+            return map;
         }
 
         /// <summary>
@@ -138,13 +159,13 @@ namespace Studio.ViewModels.Workspace.Objects
         private string _blockGraph = string.Empty;
         
         /// <summary>
-        /// All reduced resource messages
-        /// </summary>
-        private Dictionary<uint, ValidationObject> _reducedValidationObjects = new();
-
-        /// <summary>
         /// Internal asynchronous status
         /// </summary>
-        private AsyncShaderStatus _asyncStatus = AsyncShaderStatus.Pending;
+        private AsyncObjectStatus _asyncStatus = AsyncObjectStatus.Pending;
+
+        /// <summary>
+        /// Internal optimized state
+        /// </summary>
+        private bool _isOptimized;
     }
 }

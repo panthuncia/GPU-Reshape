@@ -28,6 +28,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Studio.Models.IL;
+using Studio.Models.Workspace.Objects;
 using Type = Studio.Models.IL.Type;
 
 namespace Runtime.ViewModels.IL
@@ -51,7 +52,8 @@ namespace Runtime.ViewModels.IL
         {
             // Cleanup
             _lineOffset = 0;
-            _assembledMappings.Clear();
+            _assembledLocationMappings.Clear();
+            _assembledLineMappings.Clear();
             
             // Create builder
             StringBuilder builder = new();
@@ -85,7 +87,8 @@ namespace Runtime.ViewModels.IL
         {
             // Cleanup
             _lineOffset = 0;
-            _assembledMappings.Clear();
+            _assembledLineMappings.Clear();
+            _assembledLocationMappings.Clear();
             
             // Assemble into builder
             StringBuilder builder = new();
@@ -103,7 +106,8 @@ namespace Runtime.ViewModels.IL
         {
             // Cleanup
             _lineOffset = 0;
-            _assembledMappings.Clear();
+            _assembledLineMappings.Clear();
+            _assembledLocationMappings.Clear();
             
             // Assemble into builder
             StringBuilder builder = new();
@@ -114,11 +118,32 @@ namespace Runtime.ViewModels.IL
         }
 
         /// <summary>
-        /// Get an associated mapping
+        /// Assemble an inline type
         /// </summary>
-        public AssembledMapping GetMapping(uint basicBlockId, uint instructionIndex)
+        public static string AssembleInlineType(Type type, bool shortType)
         {
-            return _assembledMappings.GetValueOrDefault(GetMappingKey(basicBlockId, instructionIndex));
+            // Assemble into builder
+            StringBuilder builder = new();
+            AssembleInlineType(type, builder, shortType);
+            
+            // To string
+            return builder.ToString();
+        }
+
+        /// <summary>
+        /// Get an associated mapping from the instruction index
+        /// </summary>
+        public AssembledLineMapping GetLineMapping(uint basicBlockId, uint instructionIndex)
+        {
+            return _assembledLocationMappings.GetValueOrDefault(GetMappingKey(basicBlockId, instructionIndex));
+        }
+
+        /// <summary>
+        /// Get an associated mapping from a line
+        /// </summary>
+        public AssembledInstructionMapping GetInstructionMapping(AssembledLineMapping lineMapping)
+        {
+            return _assembledLineMappings.GetValueOrDefault(lineMapping.Line);
         }
 
         /// <summary>
@@ -206,9 +231,17 @@ namespace Runtime.ViewModels.IL
             for (int i = 0; i < block.Instructions.Length; i++)
             {
                 // Create a mapping for later
-                _assembledMappings.Add(GetMappingKey(block.ID, (uint)i), new AssembledMapping()
+                _assembledLocationMappings.Add(GetMappingKey(block.ID, (uint)i), new AssembledLineMapping()
                 {
                     Line = _lineOffset
+                });
+
+                // Create line mapping
+                _assembledLineMappings.Add(_lineOffset, new AssembledInstructionMapping()
+                {
+                    BasicBlockId = block.ID,
+                    InstructionIndex = (uint)i,
+                    CodeOffset = block.Instructions[i].CodeOffset
                 });
 
                 // Indentation
@@ -1030,7 +1063,7 @@ namespace Runtime.ViewModels.IL
         /// <summary>
         /// Assemble an inline type
         /// </summary>
-        private void AssembleInlineType(Type type, StringBuilder builder, bool shortType = false)
+        private static void AssembleInlineType(Type type, StringBuilder builder, bool shortType = false)
         {
             switch (type.Kind)
             {
@@ -1225,9 +1258,14 @@ namespace Runtime.ViewModels.IL
         private Program _program;
 
         /// <summary>
-        /// All assembled mappings
+        /// All assembled location mappings
         /// </summary>
-        private Dictionary<UInt64, AssembledMapping> _assembledMappings = new();
+        private Dictionary<UInt64, AssembledLineMapping> _assembledLocationMappings = new();
+
+        /// <summary>
+        /// All assembled line mappings
+        /// </summary>
+        private Dictionary<uint, AssembledInstructionMapping> _assembledLineMappings = new();
             
         /// <summary>
         /// Current line offset

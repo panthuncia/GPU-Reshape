@@ -62,11 +62,16 @@ public:
     IDXCompilerEnvironment * CreateCompilerEnvironment(IDxcLibrary *library) override;
     DXCodeOffsetTraceback GetCodeOffsetTraceback(uint32_t codeOffset) override;
     const char* GetLanguage() override;
+    bool IsOptimized() override;
 
     /// Get the binding info
-    /// \return
     const DXILBindingInfo& GetBindingInfo() {
         return table.bindingInfo;
+    }
+
+    /// Get the table
+    DXILPhysicalBlockTable& GetTable() {
+        return table;
     }
 
 private:

@@ -25,6 +25,7 @@
 // 
 
 using System;
+using System.Reactive;
 using System.Reactive.Linq;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -49,6 +50,46 @@ namespace Studio.Extensions
             return (s, e) => handler(e);
         }, handler => _control.DoubleTapped += handler, handler => _control.DoubleTapped -= handler);
         
+        /// <summary>
+        /// Observable pointer pressed
+        /// </summary>
+        public IObservable<PointerPressedEventArgs> PointerPressed => Observable.FromEvent<EventHandler<PointerPressedEventArgs>, PointerPressedEventArgs>(handler =>
+        {
+            return (s, e) => handler(e);
+        }, handler => _control.PointerPressed += handler, handler => _control.PointerPressed -= handler);
+        
+        /// <summary>
+        /// Observable pointer released
+        /// </summary>
+        public IObservable<PointerReleasedEventArgs> PointerReleased => Observable.FromEvent<EventHandler<PointerReleasedEventArgs>, PointerReleasedEventArgs>(handler =>
+        {
+            return (s, e) => handler(e);
+        }, handler => _control.PointerReleased += handler, handler => _control.PointerReleased -= handler);
+        
+        /// <summary>
+        /// Observable pointer moved
+        /// </summary>
+        public IObservable<PointerEventArgs> PointerMoved => Observable.FromEvent<EventHandler<PointerEventArgs>, PointerEventArgs>(handler =>
+        {
+            return (s, e) => handler(e);
+        }, handler => _control.PointerMoved += handler, handler => _control.PointerMoved -= handler);
+        
+        /// <summary>
+        /// Observable layout updated
+        /// </summary>
+        public IObservable<Unit> LayoutUpdated => Observable.FromEvent<EventHandler, Unit>(handler =>
+        {
+            return (s, e) => handler(Unit.Default);
+        }, handler => _control.LayoutUpdated += handler, handler => _control.LayoutUpdated -= handler);
+        
+        /// <summary>
+        /// Wheel changed
+        /// </summary>
+        public IObservable<PointerWheelEventArgs> PointerWheelChanged => Observable.FromEvent<EventHandler<PointerWheelEventArgs>, PointerWheelEventArgs>(handler =>
+        {
+            return (s, e) => handler(e);
+        }, handler => _control.PointerWheelChanged += handler, handler => _control.PointerWheelChanged -= handler);
+
         /// <summary>
         /// Internal Control
         /// </summary>

@@ -29,6 +29,7 @@
 #include <Backends/DX12/States/DeviceState.h>
 #include <Backends/DX12/Translation.h>
 #include <Backends/DX12/Resource/ReservedConstantData.h>
+#include <Backend/ShaderData/ShaderDataValidationCoverage.h>
 
 ShaderDataHost::ShaderDataHost(DeviceState *device) :
     device(device),
@@ -68,11 +69,18 @@ bool ShaderDataHost::Install() {
     capabilityTable.supportsTiledResources = (options.TiledResourcesTier != D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED);
     capabilityTable.bufferMaxElementCount = UINT64_MAX;
 
+    // TODO: This is not correct
+    capabilityTable.bufferMaxSize = UINT64_MAX;
+
+    // Install coverage support
+    ComRef coverage = registry->AddNew<ShaderDataValidationCoverage>();
+    coverage->Install();
+
     // OK
     return true;
 }
 
-ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
+ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info, const char* name) {
     std::lock_guard guard(mutex);
     
     // Determine index
@@ -90,7 +98,7 @@ ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
     // Mapped description
     D3D12_RESOURCE_DESC desc{};
     desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    desc.Flags = D3D12_RESOURCE_FLAG_NONE;
     desc.Alignment = 0;
     desc.Width = Backend::IL::GetSize(info.format) * info.elementCount;
     desc.Height = 1;
@@ -100,6 +108,11 @@ ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
     desc.MipLevels = 1;
     desc.SampleDesc.Quality = 0;
     desc.SampleDesc.Count = 1;
+
+    // Always UAV-capable, unless host
+    if (!(info.flagSet & ShaderDataBufferFlag::Host)) {
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
 
     // Set index
     indices[rid] = static_cast<uint32_t>(resources.size());
@@ -120,12 +133,60 @@ ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
             reinterpret_cast<void**>(&entry.allocation.resource)
         );
     } else {
-        entry.allocation = device->deviceAllocator->Allocate(desc, info.flagSet & ShaderDataBufferFlag::HostVisible ? AllocationResidency::HostVisible : AllocationResidency::Device);
+        AllocationResidency residency;
+
+        // Translate residency
+        if (info.flagSet & ShaderDataBufferFlag::Host) {
+            residency = AllocationResidency::HostReadback;
+            entry.isNonDescriptor = true;
+        } else if (info.flagSet & ShaderDataBufferFlag::HostVisible) {
+            residency = AllocationResidency::HostVisible;
+            entry.isNonDescriptor = info.flagSet & ShaderDataBufferFlag::NonDescriptor;
+        } else {
+            residency = AllocationResidency::Device;
+        }
+        
+        entry.allocation = device->deviceAllocator->Allocate(desc, residency);
     }
 
 #ifndef NDEBUG
-    entry.allocation.resource->SetName(L"ShaderDataHostBuffer");
+    wchar_t nameWide[256];
+    if (size_t length = std::strlen(name); !mbstowcs_s(&length, nameWide, name, length)) {
+        entry.allocation.resource->SetName(nameWide);
+    }
 #endif // NDEBUG
+
+    // OK
+    return rid;
+}
+
+ShaderDataID ShaderDataHost::CreateBufferBinding(const ShaderProgramID& programID, const ShaderDataBufferBindingInfo &info) {
+    std::lock_guard guard(mutex);
+
+    // Determine index
+    ShaderDataID rid;
+    if (freeIndices.empty()) {
+        // Allocate at end
+        rid = static_cast<uint32_t>(indices.size());
+        indices.emplace_back();
+    } else {
+        // Consume free index
+        rid = freeIndices.back();
+        freeIndices.pop_back();
+    }
+
+    // Set index
+    indices[rid] = static_cast<uint32_t>(resources.size());
+
+    // Create allocation
+    ResourceEntry &entry = resources.emplace_back();
+    entry.info.id = rid;
+    entry.info.type = ShaderDataType::BufferBinding;
+    entry.info.bufferBinding = info;
+
+    // Set per program binding
+    ProgramEntry& program = programs[programID];
+    program.shaderDataIDs.push_back(rid);
 
     // OK
     return rid;
@@ -200,6 +261,15 @@ void *ShaderDataHost::Map(ShaderDataID rid) {
     return device->deviceAllocator->Map(entry.allocation);
 }
 
+void ShaderDataHost::Unmap(ShaderDataID rid, void *mapped) {
+    std::lock_guard guard(mutex);
+    uint32_t index = indices[rid];
+
+    // Entry to map
+    ResourceEntry &entry = resources[index];
+    device->deviceAllocator->Unmap(entry.allocation);
+}
+
 ShaderDataMappingID ShaderDataHost::CreateMapping(ShaderDataID data, uint64_t tileCount) {
     std::lock_guard guard(mutex);
     
@@ -262,6 +332,24 @@ D3D12MA::Allocation * ShaderDataHost::GetMappingAllocation(ShaderDataMappingID m
     return entry.allocation;
 }
 
+uint32_t ShaderDataHost::GetBindingIndex(ShaderProgramID programID, ShaderDataID rid) {
+    std::lock_guard guard(mutex);
+
+    // Get program
+    ASSERT(programs.contains(programID), "Program not registered");
+    ProgramEntry& program = programs[programID];
+
+    // Find the index of the RID
+    for (uint32_t i = 0; i < program.shaderDataIDs.size(); i++) {
+        if (program.shaderDataIDs[i] == rid) {
+            return i;
+        }
+    }
+
+    ASSERT(false, "Shader data not registered");
+    return InvalidShaderDataID;
+}
+
 void ShaderDataHost::Destroy(ShaderDataID rid) {
     std::lock_guard guard(mutex);
     uint32_t index = indices[rid];
@@ -293,13 +381,17 @@ void ShaderDataHost::Destroy(ShaderDataID rid) {
     freeIndices.push_back(rid);
 }
 
-void ShaderDataHost::Enumerate(uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) {
+void ShaderDataHost::EnumerateShader(uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) {
     std::lock_guard guard(mutex);
     
     if (out) {
         uint32_t offset = 0;
 
         for (uint32_t i = 0; i < resources.size(); i++) {
+            if (resources[i].isNonDescriptor) {
+                continue;
+            }
+            
             if (mask & resources[i].info.type) {
                 out[offset++] = resources[i].info;
             }
@@ -308,7 +400,48 @@ void ShaderDataHost::Enumerate(uint32_t *count, ShaderDataInfo *out, ShaderDataT
         uint32_t value = 0;
 
         for (uint32_t i = 0; i < resources.size(); i++) {
+            if (resources[i].isNonDescriptor) {
+                continue;
+            }
+            
             if (mask & resources[i].info.type) {
+                value++;
+            }
+        }
+
+        *count = value;
+    }
+}
+
+void ShaderDataHost::EnumerateProgram(ShaderProgramID programID, uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) {
+    std::lock_guard guard(mutex);
+
+    // Find program
+    auto it = programs.find(programID);
+    if (it == programs.end()) {
+        *count = 0;
+        return;
+    }
+    
+    if (out) {
+        uint32_t offset = 0;
+
+        for (uint32_t i = 0; i < it->second.shaderDataIDs.size(); i++) {
+            const ResourceEntry& resource = resources[indices[it->second.shaderDataIDs[i]]];
+
+            // Is of type?
+            if (mask & resource.info.type) {
+                out[offset++] = resource.info;
+            }
+        }
+    } else {
+        uint32_t value = 0;
+
+        for (uint32_t i = 0; i < it->second.shaderDataIDs.size(); i++) {
+            const ResourceEntry& resource = resources[indices[it->second.shaderDataIDs[i]]];
+            
+            // Is of type?
+            if (mask & resource.info.type) {
                 value++;
             }
         }
@@ -329,6 +462,10 @@ void ShaderDataHost::CreateDescriptors(D3D12_CPU_DESCRIPTOR_HANDLE baseDescripto
         const ResourceEntry &entry = resources[i];
 
         if (!(ShaderDataType::DescriptorMask & entry.info.type)) {
+            continue;
+        }
+        
+        if (resources[i].isNonDescriptor) {
             continue;
         }
 
@@ -423,7 +560,7 @@ ConstantShaderDataBuffer ShaderDataHost::CreateConstantDataBuffer() {
     desc.SampleDesc.Count = 1;
 
     // Allocate buffer data on host, let the drivers handle page swapping
-    out.allocation = device->deviceAllocator->Allocate(desc, AllocationResidency::Host);
+    out.allocation = device->deviceAllocator->Allocate(desc, AllocationResidency::HostVisible);
 
 #ifndef NDEBUG
     out.allocation.resource->SetName(L"ShaderDataHostConstantDataBuffer");

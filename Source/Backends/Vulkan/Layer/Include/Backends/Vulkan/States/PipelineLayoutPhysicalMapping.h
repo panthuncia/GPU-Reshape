@@ -27,10 +27,8 @@
 #pragma once
 
 // Layer
-#include "DescriptorLayoutPhysicalMapping.h"
-
-// Std
-#include <cstdint>
+#include <Backends/Vulkan/Resource/DescriptorDataControl.h>
+#include <Backends/Vulkan/States/DescriptorLayoutPhysicalMapping.h>
 
 struct PipelineLayoutPhysicalMapping {
     /// Mapping hash
@@ -38,4 +36,7 @@ struct PipelineLayoutPhysicalMapping {
 
     /// All laid out descriptor sets
     std::vector<DescriptorLayoutPhysicalMapping> descriptorSets;
+    
+    /// Data control for this root signature
+    DescriptorDataControl descriptorDataControl;
 };

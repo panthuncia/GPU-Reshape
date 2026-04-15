@@ -29,13 +29,36 @@
 // Std
 #include <cstdint>
 
+namespace IL {
+    struct Function;
+}
+
 /// Source association
 struct DXSourceAssociation {
     operator bool() const {
         return fileUID != UINT16_MAX;
     }
 
+    /// Get the sorting key
+    uint64_t GetKey() const {
+        uint64_t key = 0;
+        key |= static_cast<uint64_t>(fileUID) << 0ull;
+        key |= static_cast<uint64_t>(line) << 16ull;
+        key |= static_cast<uint64_t>(column) << 48ull;
+        return key;
+    }
+
     uint16_t fileUID{UINT16_MAX};
     uint32_t line{0};
     uint16_t column{0};
+};
+
+/// Instruction association
+struct DXInstructionAssociation {
+    operator bool() const {
+        return functionId != UINT32_MAX;
+    }
+
+    uint32_t functionId{UINT32_MAX};
+    uint32_t codeOffset{0};
 };

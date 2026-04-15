@@ -26,7 +26,7 @@
 
 using System;
 using System.Collections.Generic;
-using System.Reactive.Linq;
+using System.Collections.ObjectModel;
 using System.Windows.Input;
 using Studio.Models.Documents;
 using Studio.Models.Tools;
@@ -39,8 +39,12 @@ using Dock.Model.Controls;
 using Dock.Model.Core;
 using Dock.Model.ReactiveUI;
 using Dock.Model.ReactiveUI.Controls;
+using DynamicData;
 using ReactiveUI;
-using Runtime.ViewModels;
+using Studio.Services;
+using Studio.ViewModels.Traits;
+
+// TODO: Refactor this file, it's a mess from the early days
 
 namespace Studio.ViewModels
 {
@@ -131,7 +135,7 @@ namespace Studio.ViewModels
                     {
                         ActiveDockable = workspace,
                         IsExpanded = true,
-                        VisibleDockables = CreateList<IDockable>(workspace, files),
+                        VisibleDockables = CreateDockables(DockingSlot.Left, workspace, files),
                         Alignment = Alignment.Left
                     }
                 )
@@ -151,16 +155,16 @@ namespace Studio.ViewModels
                     {
                         ActiveDockable = shaders,
                         IsExpanded = true,
-                        VisibleDockables = CreateList<IDockable>(properties, shaders, pipelines),
+                        VisibleDockables = CreateDockables(DockingSlot.Right, properties, shaders, pipelines),
                         Alignment = Alignment.Right,
                         GripMode = GripMode.Visible
                     }
                 )
             };
 
-            var bottomDock = new ProportionalDock
+            var bottomLeftDock = new ProportionalDock
             {
-                Proportion = 0.15,
+                Proportion = 0.60,
                 Orientation = Orientation.Horizontal,
                 ActiveDockable = null,
                 VisibleDockables = CreateList<IDockable>
@@ -169,10 +173,27 @@ namespace Studio.ViewModels
                     {
                         ActiveDockable = log,
                         IsExpanded = true,
-                        VisibleDockables = CreateList<IDockable>(log),
-                        Alignment = Alignment.Bottom,
+                        VisibleDockables = CreateDockables(DockingSlot.BottomLeft, log),
+                        Alignment = Alignment.Left,
                         GripMode = GripMode.Visible
                     }
+                )
+            };
+
+            var bottomRightDock = new ProportionalDock
+            {
+                Orientation = Orientation.Horizontal,
+                ActiveDockable = null,
+                VisibleDockables = CreateList<IDockable>
+                (
+                    SelectFirst(new ToolDock
+                    {
+                        ActiveDockable = null,
+                        IsExpanded = true,
+                        VisibleDockables = CreateDockables(DockingSlot.BottomRight),
+                        Alignment = Alignment.Right,
+                        GripMode = GripMode.Visible
+                    })
                 )
             };
 
@@ -197,6 +218,18 @@ namespace Studio.ViewModels
                 )
             };
 
+            var bottomLayout = new ProportionalDock
+            {
+                Proportion = 0.2,
+                Orientation = Orientation.Horizontal,
+                VisibleDockables = CreateList<IDockable>
+                (
+                    bottomLeftDock,
+                    new ProportionalDockSplitter(),
+                    bottomRightDock
+                )
+            };
+
             var mainLayout = new ProportionalDock
             {
                 Orientation = Orientation.Vertical,
@@ -204,7 +237,7 @@ namespace Studio.ViewModels
                 (
                     centerLayout,
                     new ProportionalDockSplitter(),
-                    bottomDock
+                    bottomLayout
                 )
             };
 
@@ -233,6 +266,30 @@ namespace Studio.ViewModels
             _rootDock = rootDock;
             
             return rootDock;
+        }
+
+        private IDockable SelectFirst(ToolDock toolDock)
+        {
+            if (toolDock.ActiveDockable == null &&  toolDock.VisibleDockables?.Count > 0)
+            {
+                toolDock.ActiveDockable = toolDock.VisibleDockables[0];
+            }
+
+            return toolDock;
+        }
+
+        /// <summary>
+        /// Create a set of dockables
+        /// </summary>
+        private ObservableCollection<IDockable> CreateDockables(DockingSlot slot, params IDockable[] items)
+        {
+            // Must have service installed
+            var service = ServiceRegistry.Get<IDockingService>() ?? throw new InvalidOperationException();
+
+            // Install on requested set
+            ObservableCollection<IDockable> collection = new(items);
+            collection.AddRange(service.Install(slot));
+            return collection;
         }
 
         public override void InitLayout(IDockable layout)

@@ -117,6 +117,34 @@ struct CommandBuilder {
         });
     }
 
+    /// Dispatch an indirect shader program
+    /// @param bufferID indirect args buffer
+    /// @param offset indirect args byte offset
+    void DispatchIndirect(ShaderDataID bufferID, uint32_t offset) {
+        buffer.Add(DispatchIndirectCommand {
+            .buffer = bufferID,
+            .offset = offset
+        });
+    }
+
+    /// Open a predicated range
+    /// @param bufferID predicate buffer
+    /// @param offset byte offset into buffer
+    void BeginPredicate(ShaderDataID bufferID, uint32_t offset) {
+        buffer.Add(BeginPredicateCommand {
+            .buffer = bufferID,
+            .offset = offset
+        });
+    }
+
+    /// Close a predicated range
+    /// @param bufferID predicate buffer
+    void EndPredicate(ShaderDataID bufferID) {
+        buffer.Add(EndPredicateCommand {
+            .buffer = bufferID
+        });
+    }
+
     /// Discard a resource
     /// \param puid the resource puid
     void Discard(uint32_t puid) {
@@ -128,6 +156,42 @@ struct CommandBuilder {
     /// Full pipeline UAV barrier
     void UAVBarrier() {
         buffer.Add(UAVBarrierCommand{});
+    }
+
+    /// Copy a buffer region
+    /// @param sourceID source buffer
+    /// @param sourceOffset start offset into source
+    /// @param destID destination buffer
+    /// @param destOffset start offset into destination
+    /// @param byteCount number of bytes to copy
+    void CopyBuffer(ShaderDataID sourceID, uint64_t sourceOffset, ShaderDataID destID, uint64_t destOffset, uint64_t byteCount) {
+        buffer.Add(CopyBufferCommand {
+            .source = sourceID,
+            .sourceOffset = sourceOffset,
+            .dest = destID,
+            .destOffset = destOffset,
+            .byteCount = byteCount
+        });
+    }
+
+    /// Set a resource binding
+    /// @param data data binding
+    /// @param puid the puid to bind
+    void SetResource(ShaderDataID data, uint32_t puid) {
+        buffer.Add(SetResourceCommand {
+            .id = data,
+            .puid = puid
+        });
+    }
+
+    /// Set a resource binding
+    /// @param data data binding
+    /// @param bufferID the buffer to be bound
+    void SetResourceData(ShaderDataID data, ShaderDataID bufferID) {
+        buffer.Add(SetResourceDataCommand {
+            .id = data,
+            .buffer = bufferID
+        });
     }
 
 private:

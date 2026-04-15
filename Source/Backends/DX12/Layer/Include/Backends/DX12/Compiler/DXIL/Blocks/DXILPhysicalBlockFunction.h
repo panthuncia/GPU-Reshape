@@ -34,6 +34,8 @@
 #include <Backends/DX12/Compiler/DXIL/DXILHeader.h>
 #include <Backends/DX12/Compiler/DXCodeOffsetTraceback.h>
 #include <Backends/DX12/Resource/ReservedConstantData.h>
+#include <Backends/DX12/States/RootParameterVisibility.h>
+#include <Backends/DX12/States/RootSignatureUserClassType.h>
 #include <Backends/DX12/Compiler/DXIL/DXIL.Gen.h>
 
 // Common
@@ -45,6 +47,7 @@
 // Forward declarations
 struct DXCompileJob;
 struct DXILValueReader;
+struct RootSignaturePhysicalMapping;
 
 /// Function block
 struct DXILPhysicalBlockFunction : public DXILPhysicalBlockSection {
@@ -69,8 +72,14 @@ public:
     /// Get the declaration associated with an id
     const DXILFunctionDeclaration* GetFunctionDeclaration(uint32_t id);
 
+    /// Get the declaration associated with an IL id
+    const DXILFunctionDeclaration* GetFunctionDeclarationFromIL(IL::ID id);
+
     /// Get the declaration associated with an index
     const DXILFunctionDeclaration* GetFunctionDeclarationFromIndex(uint32_t index);
+
+    /// Get the link index of an IL id
+    uint32_t GetNonPrototypeFunctionIndex(IL::ID id);
 
     /// Get a source traceback
     /// \param codeOffset given offset, must originate from the same function
@@ -189,8 +198,22 @@ private:
     uint32_t eventHandle;
     uint32_t constantHandle;
 
+    /// Local handles
+    uint32_t localDescriptorHandle{UINT32_MAX};
+
     /// All stream handles
     TrivialStackVector<uint32_t, 64> exportStreamHandles;
+
+    /// Resolved local physical mappings
+    RootSignaturePhysicalMapping* localPhysicalMappings{nullptr};
+
+    /// Create the handle annotation
+    /// \param block appended block
+    /// \param result allocated result
+    /// \param _class designated class
+    /// \param handleId metadata handle
+    /// \param bindingHandle the binding to annotate
+    void CreateHandleAnnotation(struct LLVMBlock *block, uint32_t result, DXILShaderResourceClass _class, uint32_t handleId, uint32_t bindingHandle);
 
     /// Create a universal handle
     /// \param block appended block
@@ -202,7 +225,7 @@ private:
 
     /// Create an export handle
     /// \param block appended block
-    void CreateHandles(const DXCompileJob &job, struct LLVMBlock* block);
+    void CreateHandles(const DXCompileJob &job, struct LLVMBlock* block, const DXILFunctionDeclaration* function);
 
     /// Create an export handle
     /// \param block appended block
@@ -215,6 +238,10 @@ private:
     /// Create the shader data handles
     /// \param block appended block
     void CreateShaderDataHandle(const DXCompileJob &job, struct LLVMBlock* block);
+
+    /// Create the shader data handles
+    /// \param block appended block
+    void CreateShaderBindingDataHandle(const DXCompileJob &job, struct LLVMBlock* block);
 
     /// Create the descriptor handle
     /// \param block appended block
@@ -236,6 +263,9 @@ private:
     struct DynamicRootSignatureUserMapping {
         /// Source mapping
         const struct RootSignatureUserMapping* source{nullptr};
+
+        /// The originating physical mapping
+        RootSignaturePhysicalMapping* physicalMapping{nullptr};
 
         /// Dynamic, sequential, offset due to dynamic indexing
         IL::ID dynamicOffset{IL::InvalidID};
@@ -266,6 +296,16 @@ private:
     /// \return empty if not found
     DynamicRootSignatureUserMapping GetResourceUserMapping(const DXCompileJob& job, LLVMBlock* block, const Vector<LLVMRecord>& source, IL::ID resource);
 
+    /// Try to get a resource from a particular physical space
+    /// \param block source block
+    /// \param physicalMapping current physical mappings to try to extract from
+    /// \param rootVisibility expected visibility
+    /// \param classType expected class type
+    /// \param metadata handle metadata
+    /// \param out user mapping, if found
+    /// \return true if found
+    bool TryGetResourceUserMappingFromPhysicalSpace(LLVMBlock* block, RootSignaturePhysicalMapping* physicalMapping, RootParameterVisibility rootVisibility, RootSignatureUserClassType classType, const HandleMetadata& metadata, DynamicRootSignatureUserMapping& out);
+
     /// Get a resource type from annotation
     /// \param properties resource properties
     /// \return resource type
@@ -294,6 +334,20 @@ private:
     /// \param _instr instruction to be compiled
     void CompileResourceTokenInstruction(const DXCompileJob& job, LLVMBlock* block, const Vector<LLVMRecord>& source , const IL::ResourceTokenInstruction* _instr);
 
+    /// Compile an execution info instruction
+    /// \param job source job
+    /// \param block destination block
+    /// \param source all source instructions
+    /// \param _instr instruction to be compiled
+    void CompileExecutionInfoInstruction(const DXCompileJob& job, LLVMBlock* block, const Vector<LLVMRecord>& vector, const IL::ExecutionInfoInstruction* _instr);
+
+    /// Load a data control dword from the row aligned cbuffer address
+    /// \param job source job
+    /// \param block destination block
+    /// @param DWordIndex the specific dword to be loaded
+    /// @return dword id
+    IL::ID LoadDataControlDWord(const DXCompileJob& job, LLVMBlock* block, uint32_t DWordIndex);
+    
     /// Migrate an operand in a constant block
     /// \param declaration function declaration
     /// \param operand operand to migrate 

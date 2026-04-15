@@ -32,6 +32,7 @@
 #include <Backends/Vulkan/Compiler/SpvSourceMap.h>
 #include <Backends/Vulkan/Compiler/ShaderCompiler.h>
 #include <Backends/Vulkan/Symbolizer/ShaderSGUIDHost.h>
+#include <Backends/Vulkan/Tables/InstanceDispatchTable.h>
 
 // Bridge
 #include <Bridge/IBridge.h>
@@ -102,6 +103,14 @@ void MetadataController::Handle(const MessageStream *streams, uint32_t count) {
                     OnMessage(*it.Get<GetShaderILMessage>());
                     break;
                 }
+                case SetUseShaderExternalReferenceMessage::kID: {
+                    OnMessage(*it.Get<SetUseShaderExternalReferenceMessage>());
+                    break;
+                }
+                case ReleaseShaderMessage::kID: {
+                    OnMessage(*it.Get<ReleaseShaderMessage>());
+                    break;
+                }
                 case GetShaderBlockGraphMessage::kID: {
                     OnMessage(*it.Get<GetShaderBlockGraphMessage>());
                     break;
@@ -122,6 +131,22 @@ void MetadataController::Handle(const MessageStream *streams, uint32_t count) {
                     OnMessage(*it.Get<GetShaderSourceMappingMessage>());
                     break;
                 }
+                case GetPipelineStatusMessage::kID: {
+                    OnMessage(*it.Get<GetPipelineStatusMessage>());
+                    break;
+                }
+                case GetShaderStatusMessage::kID: {
+                    OnMessage(*it.Get<GetShaderStatusMessage>());
+                    break;
+                }
+                case GetShaderInstructionMappingMessage::kID: {
+                    OnMessage(*it.Get<GetShaderInstructionMappingMessage>());
+                    break;
+                }
+                case GetShaderSourceInstructionMappingMessage::kID: {
+                    OnMessage(*it.Get<GetShaderSourceInstructionMappingMessage>());
+                    break;
+                }
             }
         }
     }
@@ -132,6 +157,11 @@ void MetadataController::OnMessage(const GetPipelineNameMessage& message) {
 
     // Attempt to find shader with given UID
     PipelineState* pipeline = table->states_pipeline.GetFromUID(message.pipelineUID);
+
+    // TODO: Report back if it was found or not
+    if (!pipeline) {
+        return;
+    }
 
     // Determine name
     const char* name = pipeline->debugName ? pipeline->debugName : "Unknown";
@@ -151,6 +181,9 @@ void MetadataController::OnMessage(const GetPipelineNameMessage& message) {
             break;
         case PipelineType::Compute:
             file->type = 2;
+            break;
+        case PipelineType::Raytracing:
+            file->type = 3;
             break;
     }
 }
@@ -190,6 +223,7 @@ void MetadataController::OnMessage(const GetShaderCodeMessage& message) {
     if (!shader || !shader->spirvModule) {
         auto&& response = view.Add<ShaderCodeMessage>();
         response->shaderUID = message.shaderUID;
+        response->poolCode = message.poolCode;
         response->found = false;
         return;
     }
@@ -275,6 +309,195 @@ void MetadataController::OnMessage(const GetShaderILMessage& message) {
     file->program.Set(ilStream.str());
 }
 
+void MetadataController::OnMessage(const struct ReleaseShaderMessage &message) {
+    // Release if found
+    if (ShaderModuleState* shader = table->states_shaderModule.GetFromUID(message.shaderUID)) {
+        if (shader->hasExternalReference) {
+            destroyRef(shader, allocators);
+            shader->hasExternalReference = false;
+        } else {
+            table->parent->logBuffer->Add("Vulkan", LogSeverity::Error, "Releasing shader without external reference");
+        }
+    }
+}
+
+void MetadataController::OnMessage(const struct SetUseShaderExternalReferenceMessage &message) {
+    useShaderExternalReference = message.enabled;
+}
+
+static bool IsPipelineActive(PipelineState* pipeline, std::chrono::nanoseconds referencePoint) {
+    auto nsEpochLastUsed = std::chrono::nanoseconds(pipeline->lastUsedTimestampNS.load(std::memory_order_relaxed));
+    auto secondSinceLast = std::chrono::duration_cast<std::chrono::seconds>(referencePoint - nsEpochLastUsed).count();
+
+    // Very arbitrary, anything of relevance here?
+    return secondSinceLast <= 5;
+}
+
+void MetadataController::OnMessage(const struct GetPipelineStatusMessage &message) {
+    MessageStream statusStream;
+
+    // Reference point for "active" state
+    auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch());
+
+    // Retrieve status for each pipeline
+    for (uint32_t i = 0; i < message.pipelineUIDs.count; i++) {
+        uint64_t uid = message.pipelineUIDs[i];
+
+        // Try to get pipeline
+        PipelineState* pipeline = table->states_pipeline.GetFromUID(uid);
+        if (!pipeline) {
+            continue;
+        }
+
+        // Add status
+        auto* status = MessageStreamView<PipelineStatusMessage>(statusStream).Add();
+        status->pipelineUID = uid;
+        status->active = IsPipelineActive(pipeline, now);
+        status->instrumented = pipeline->hotSwapObject.load() != nullptr;
+    }
+
+    // Submit response
+    auto&& response = MessageStreamView(stream).Add<PipelineStatusCollectionMessage>(PipelineStatusCollectionMessage::AllocationInfo { .statusByteSize = statusStream.GetByteSize() });
+    response->status.Set(statusStream);
+}
+
+void MetadataController::OnMessage(const struct GetShaderStatusMessage &message) {
+    MessageStream statusStream;
+
+    // Reference point for "active" state
+    auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch());
+
+    // Retrieve status for each shader
+    for (uint32_t i = 0; i < message.shaderUIDs.count; i++) {
+        uint64_t uid = message.shaderUIDs[i];
+
+        // Try to get shader
+        ShaderModuleState* shader = table->states_shaderModule.GetFromUID(uid);
+        if (!shader) {
+            continue;
+        }
+
+        // Add status
+        auto* status = MessageStreamView<ShaderStatusMessage>(statusStream).Add();
+        status->shaderUID = uid;
+        status->active = false;
+        status->instrumented = false;
+        
+        // Check if any dependent pipeline is active
+        for (PipelineState* pipeline : table->dependencies_shaderModulesPipelines.Get(shader)) {
+            status->active       |= IsPipelineActive(pipeline, now) ? 1 : 0;
+            status->instrumented |= pipeline->hotSwapObject.load() != nullptr;
+        }
+    }
+
+    // Submit response
+    auto&& response = MessageStreamView(stream).Add<ShaderStatusCollectionMessage>(ShaderStatusCollectionMessage::AllocationInfo { .statusByteSize = statusStream.GetByteSize() });
+    response->status.Set(statusStream);
+}
+
+void MetadataController::OnMessage(const struct GetShaderInstructionMappingMessage& message) {
+    MessageStreamView view(stream);
+
+    // Attempt to find shader with given UID
+    ShaderModuleState* shader = table->states_shaderModule.GetFromUID(message.shaderGUID);
+
+    // Module initialization
+    if (shaderCompiler && shader && !shader->spirvModule) {
+        shaderCompiler->InitializeModule(shader);
+    }
+
+    // Failed?
+    if (!shader || !shader->spirvModule) {
+        auto&& response = view.Add<ShaderInstructionMappingSetMessage>(ShaderInstructionMappingSetMessage::AllocationInfo { .mappingsByteSize = 0 });
+        response->shaderGUID = message.shaderGUID;
+        response->fileUID = message.fileUID;
+        response->line = message.line;
+        response->found = false;
+        return;
+    }
+
+    // Get source map
+    const SpvSourceMap *sourceMap = shader->spirvModule->GetSourceMap();
+
+    // No sources available?
+    if (!sourceMap) {
+        auto&& response = view.Add<ShaderInstructionMappingSetMessage>(ShaderInstructionMappingSetMessage::AllocationInfo { .mappingsByteSize = 0 });
+        response->shaderGUID = message.shaderGUID;
+        response->fileUID = message.fileUID;
+        response->line = message.line;
+        response->found = false;
+        return;
+    }
+
+    // Create mappings set
+    MessageStream streamMappings;
+    for (SpvInstructionAssociation association : sourceMap->GetInstructionAssociations(static_cast<uint16_t>(message.fileUID), message.line)) {
+        // Append to set
+        auto* status = MessageStreamView<ShaderInstructionMappingMessage>(streamMappings).Add();
+        status->basicBlockId = association.basicBlockId;
+        status->instructionIndex = association.instructionIndex;
+        status->codeOffset = association.codeOffset;
+    }
+
+    // Report all mappings
+    auto&& response = view.Add<ShaderInstructionMappingSetMessage>(ShaderInstructionMappingSetMessage::AllocationInfo { .mappingsByteSize = streamMappings.GetByteSize() });
+    response->shaderGUID = message.shaderGUID;
+    response->fileUID = message.fileUID;
+    response->line = message.line;
+    response->found = true;
+    response->mappings.Set(streamMappings);
+}
+
+void MetadataController::OnMessage(const struct GetShaderSourceInstructionMappingMessage &message) {
+    MessageStreamView view(stream);
+
+    // Attempt to find shader with given UID
+    ShaderModuleState* shader = table->states_shaderModule.GetFromUID(message.shaderGUID);
+
+    // Module initialization
+    if (shaderCompiler && shader && !shader->spirvModule) {
+        shaderCompiler->InitializeModule(shader);
+    }
+
+    // Failed?
+    if (!shader || !shader->spirvModule) {
+        auto&& response = view.Add<ShaderSourceInstructionMappingMessage>();
+        response->shaderGUID = message.shaderGUID;
+        response->basicBlockId = message.basicBlockId;
+        response->instructionIndex = message.instructionIndex;
+        response->codeOffset = message.codeOffset;
+        response->found = false;
+        return;
+    }
+
+    // Get source map
+    const SpvSourceMap *sourceMap = shader->spirvModule->GetSourceMap();
+
+    // Standard response
+    auto&& response = view.Add<ShaderSourceInstructionMappingMessage>();
+    response->shaderGUID = message.shaderGUID;
+    response->basicBlockId = message.basicBlockId;
+    response->instructionIndex = message.instructionIndex;
+    response->codeOffset = message.codeOffset;
+    response->found = false;
+    
+    // No sources available?
+    if (!sourceMap) {
+        return;
+    }
+
+    // Get association
+    SpvSourceAssociation sourceAssociation = sourceMap->GetSourceAssociation(message.codeOffset);
+    if (!sourceAssociation) {
+        return;
+    }
+
+    // Compose message
+    response->found = true;
+    response->fileUID = sourceAssociation.fileUID;
+    response->line = sourceAssociation.line;
+}
+
 void MetadataController::OnMessage(const GetShaderBlockGraphMessage& message) {
     MessageStreamView view(stream);
 
@@ -333,7 +556,9 @@ void MetadataController::OnMessage(const struct GetObjectStatesMessage& message)
     // Add response (linear locks)
     auto&& response = view.Add<ObjectStatesMessage>();
     response->shaderCount = static_cast<uint32_t>(table->states_shaderModule.GetLinear().object.size());
+    response->shaderUIDHead = static_cast<uint32_t>(table->states_shaderModule.GetUIDHead());
     response->pipelineCount = static_cast<uint32_t>(table->states_shaderModule.GetLinear().object.size());
+    response->pipelineUIDHead = static_cast<uint32_t>(table->states_pipeline.GetUIDHead());
 }
 
 void MetadataController::OnMessage(const struct GetShaderUIDRangeMessage& message) {
@@ -417,4 +642,11 @@ void MetadataController::Commit() {
     // Export general to bridge
     bridge->GetOutput()->AddStreamAndSwap(stream);
     bridge->GetOutput()->AddStreamAndSwap(segmentMappingStream);
+}
+
+void MetadataController::CreateShader(ShaderModuleState *state) {
+    if (useShaderExternalReference) {
+        state->hasExternalReference = true;
+        state->AddUser();
+    }
 }

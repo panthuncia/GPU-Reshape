@@ -37,6 +37,7 @@ Project_AddSchema(GeneratedLibSchema Schemas/Feature.xml Include/Schemas)
 Project_AddSchema(GeneratedLibSchema Schemas/Object.xml Include/Schemas)
 Project_AddSchema(GeneratedLibSchema Schemas/Versioning.xml Include/Schemas)
 Project_AddSchema(GeneratedLibSchema Schemas/PDB.xml Include/Schemas)
+Project_AddSchema(GeneratedLibSchema Schemas/Indirect.xml Include/Schemas)
 
 add_library(
     GRS.Libraries.Backend STATIC
@@ -50,6 +51,7 @@ add_library(
     Source/IL/Function.cpp
     Source/IL/BasicBlock.cpp
     Source/Diagnostic/DiagnosticFatal.cpp
+    Source/ShaderData/ShaderDataValidationCoverage.cpp
 
     # Generated schemas
     ${GeneratedLibSchemaCPP}

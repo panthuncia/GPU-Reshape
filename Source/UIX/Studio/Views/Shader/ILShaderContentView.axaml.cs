@@ -26,30 +26,21 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Reactive;
 using System.Reactive.Disposables;
-using System.Reactive.Linq;
-using System.Reactive.Subjects;
-using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Input;
-using Avalonia.Markup.Xaml;
 using AvaloniaEdit.TextMate;
 using DynamicData;
 using DynamicData.Binding;
 using ReactiveUI;
 using Runtime.Utils.Workspace;
 using Runtime.ViewModels.IL;
-using Runtime.ViewModels.Shader;
 using Studio.Extensions;
 using Studio.Models.Instrumentation;
 using Studio.Models.Workspace.Objects;
+using Studio.Services;
 using Studio.ViewModels.Shader;
 using Studio.ViewModels.Workspace.Objects;
 using Studio.Views.Editor;
-using TextMateSharp.Grammars;
-using ShaderViewModel = Studio.ViewModels.Documents.ShaderViewModel;
 
 namespace Studio.Views.Shader
 {
@@ -87,7 +78,6 @@ namespace Studio.Views.Shader
 
             // Configure marker canvas
             MarkerCanvas.TextView = Editor.TextArea.TextView;
-            MarkerCanvas.DetailCommand = ReactiveCommand.Create<ValidationObject>(OnDetailCommand);
 
             // Add renderers
             Editor.TextArea.TextView.BackgroundRenderers.Add(_validationBackgroundRenderer);
@@ -106,10 +96,19 @@ namespace Studio.Views.Shader
                 .CastNullable<ILShaderContentViewModel>()
                 .Subscribe(ilViewModel =>
             {
+                // Install the extensions
+                ServiceRegistry.Get<IEditorService>()?.InstallView(ilViewModel, Editor);
+                
                 // Update services
                 _validationTextMarkerService.ShaderContentViewModel = ilViewModel;
                 _validationBackgroundRenderer.ShaderContentViewModel = ilViewModel;
                 MarkerCanvas.ShaderContentViewModel = ilViewModel;
+                
+                // Bind detail
+                ilViewModel.MarkerCanvasViewModel.DetailCommand = ReactiveCommand.Create<ITextualSourceObject>(OnDetailCommand);
+
+                // Assign marker view model
+                MarkerCanvas.DataContext = ilViewModel.MarkerCanvasViewModel;
                 
                 // Bind assembled data
                 ilViewModel.WhenAnyValue(x => x.AssembledProgram).WhereNotNull().Subscribe(assembled =>
@@ -118,7 +117,7 @@ namespace Studio.Views.Shader
                     Editor.Text = assembled;
                     
                     // Push all pending objects
-                    _pendingAssembling.ForEach(OnValidationObjectAdded);
+                    _pendingAssembling.ForEach(x => OnValidationObjectAdded(ilViewModel, x));
                     _pendingAssembling.Clear();
 
                     // Bind navigation location
@@ -131,20 +130,21 @@ namespace Studio.Views.Shader
                 });
                 
                 // Bind object model
-                ilViewModel.WhenAnyValue(y => y.Object).WhereNotNull().Subscribe(_object =>
+                // We're working with individual shaders here
+                ilViewModel.WhenAnyValue(y => y.Content).CastNullable<ShaderViewModel>().WhereNotNull().Subscribe(_object =>
                 {
                     // Bind objects
                     _object.ValidationObjects.ToObservableChangeSet()
                         .AsObservableList()
                         .Connect()
-                        .OnItemAdded(OnValidationObjectAdded)
-                        .OnItemRemoved(OnValidationObjectRemoved)
+                        .OnItemAdded(x => OnValidationObjectAdded(ilViewModel, x))
+                        .OnItemRemoved(x => OnValidationObjectRemoved(ilViewModel, x))
                         .Subscribe();
                     
                     // Bind status
                     _object.WhenAnyValue(o => o.AsyncStatus).Subscribe(status =>
                     {
-                        if (status.HasFlag(AsyncShaderStatus.NotFound))
+                        if (status.HasFlag(AsyncObjectStatus.NotFound))
                         {
                             Editor.Text = Studio.Resources.Resources.Shader_NotFound;
                         }
@@ -152,7 +152,7 @@ namespace Studio.Views.Shader
                 });
                 
                 // Reset front state
-                ilViewModel.SelectedValidationObject = null;
+                ilViewModel.SelectedTextualSourceObject = null;
                 ilViewModel.DetailViewModel = null;
             });
         }
@@ -160,58 +160,70 @@ namespace Studio.Views.Shader
         /// <summary>
         /// Invoked on detailed requests
         /// </summary>
-        private void OnDetailCommand(ValidationObject validationObject)
+        private void OnDetailCommand(ITextualSourceObject sourceObject)
         {
             // Validation
             if (DataContext is not ILShaderContentViewModel
                 {
-                    Object: {} shaderViewModel, 
+                    Content: ShaderViewModel shaderViewModel, 
                     PropertyCollection: {} property
                 } vm)
             {
                 return;
             }
 
-            // Check if there's any detailed info at all
-            if (!ShaderDetailUtils.CanDetailCollect(validationObject, shaderViewModel))
+            InstrumentationVersion? version = null;
+
+            // If validation, bind instrumentation
+            if (sourceObject is ValidationObject validationObject)
             {
-                vm.DetailViewModel = new NoDetailViewModel()
+                // Check if there's any detailed info at all
+                if (!ShaderDetailUtils.CanDetailCollect(validationObject, shaderViewModel))
                 {
-                    Object = vm.Object,
-                    PropertyCollection = vm.PropertyCollection
-                };
-                return;
+                    vm.DetailViewModel = new NoDetailViewModel
+                    {
+                        Object = vm.Content as ShaderViewModel,
+                        PropertyCollection = vm.PropertyCollection
+                    };
+                    return;
+                }
+                
+                // Ensure detailed collection has started
+                version = ShaderDetailUtils.BeginDetailedCollection(shaderViewModel, property);
+            }
+
+            // Set selection
+            vm.SelectedTextualSourceObject = sourceObject;
+            
+            // Set global selection
+            if (ServiceRegistry.Get<ISourceService>() is { } sourceService)
+            {
+                sourceService.SelectedSourceObject = sourceObject;
             }
             
-            // Ensure detailed collection has started
-            InstrumentationVersion version = ShaderDetailUtils.BeginDetailedCollection(shaderViewModel, property);
-                
-            // Set selection
-            vm.SelectedValidationObject = validationObject;
-            
             // Bind detail context
-            validationObject.WhenAnyValue(x => x.DetailViewModel).Subscribe(x =>
+            sourceObject.WhenAnyValue(x => x.DetailViewModel).Subscribe(x =>
             {
                 vm.DetailViewModel = x ?? new MissingDetailViewModel()
                 {
-                    Object = vm.Object,
+                    Object = vm.Content as ShaderViewModel,
                     PropertyCollection = vm.PropertyCollection,
                     Version = version
                 };
             }).DisposeWithClear(_detailDisposable);
         }
 
-        private void UpdateNavigationLocation(ILShaderContentViewModel ilViewModel, NavigationLocation location)
+        private void UpdateNavigationLocation(ILShaderContentViewModel il, NavigationLocation location)
         {
             // Get assembled mapping
-            AssembledMapping? mapping = ilViewModel.Assembler?.GetMapping(location.Location.BasicBlockId, location.Location.InstructionIndex);
+            AssembledLineMapping? mapping = il.Assembler?.GetLineMapping(location.Location.BasicBlockId, location.Location.InstructionIndex);
             if (mapping == null)
             {
                 return;
             }
 
             // Update selected file
-            ilViewModel.SelectedValidationObject = location.Object;
+            il.SelectedTextualSourceObject = location.Object;
                             
             // Scroll to target
             // TODO: 10 is a total guess, we need to derive it from the height, but that doesn't exist yet.
@@ -228,7 +240,7 @@ namespace Studio.Views.Shader
         /// Invoked on object added
         /// </summary>
         /// <param name="validationObject"></param>
-        private void OnValidationObjectAdded(ValidationObject validationObject)
+        private void OnValidationObjectAdded(ILShaderContentViewModel viewModel, ValidationObject validationObject)
         {
             // Pending assembling?
             if (DataContext is ILShaderContentViewModel { Assembler: null })
@@ -242,7 +254,7 @@ namespace Studio.Views.Shader
             _validationBackgroundRenderer.Add(validationObject);
             
             // Update canvas
-            MarkerCanvas.Add(validationObject);
+            viewModel.MarkerCanvasViewModel.SourceObjects.Add(validationObject);
             
             // Redraw for background update
             Editor.TextArea.TextView.Redraw();
@@ -252,14 +264,14 @@ namespace Studio.Views.Shader
         /// Invoked on object removed
         /// </summary>
         /// <param name="validationObject"></param>
-        private void OnValidationObjectRemoved(ValidationObject validationObject)
+        private void OnValidationObjectRemoved(ILShaderContentViewModel viewModel, ValidationObject validationObject)
         {
             // Update services
             _validationTextMarkerService.Remove(validationObject);
             _validationBackgroundRenderer.Remove(validationObject);
             
             // Update canvas
-            MarkerCanvas.Remove(validationObject);
+            viewModel.MarkerCanvasViewModel.SourceObjects.Remove(validationObject);
             
             // Redraw for background update
             Editor.TextArea.TextView.Redraw();

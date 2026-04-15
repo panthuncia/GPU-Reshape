@@ -30,7 +30,14 @@
 #include "Vulkan.h"
 
 // Layer
+#include <Backends/Vulkan/Command/ReconstructionFlag.h>
 #include <Backends/Vulkan/Objects/CommandBufferObject.h>
+
+// Backend
+#include <Backend/IL/Execution/ExecutionInfo.h>
+
+// Forward declarations
+struct ShaderExportDeviceAllocation;
 
 /// Create all device command proxies
 /// \param table
@@ -40,6 +47,56 @@ void CreateDeviceCommandProxies(DeviceDispatchTable* table);
 /// \param table
 /// \param featureSet
 void SetDeviceCommandFeatureSetAndCommit(DeviceDispatchTable* table, uint64_t featureSet);
+
+/// Check if execution info is enabled
+/// @param object current command object state
+/// @param type pipeline type to check
+bool UsesExecutionInfo(CommandBufferObject* object, PipelineType type);
+
+/// Get the basic execution info for the bound pipeline
+/// @param object current command object state
+/// @param type pipeline type to check
+/// @return info
+ExecutionInfo GetBaseExecutionInfo(CommandBufferObject* object, PipelineType type);
+
+/// Add a new debug stream to the streamer
+/// @param commandBuffer command buffer to stage the stream from
+/// @param buffer buffer to debug
+/// @param offset offset into the buffer
+/// @param length length from the offset to debug
+/// @param name identifier for the debug data
+void AddDebugStream(CommandBufferObject *commandBuffer, VkBuffer buffer, uint64_t offset, uint64_t length, const std::string &name);
+
+/// Add a new debug stream to the streamer
+/// @param commandBuffer command buffer to stage the stream from
+/// @param allocation allocation to debug
+/// @param name identifier for the debug data
+void AddDebugStream(CommandBufferObject* commandBuffer, const ShaderExportDeviceAllocation& allocation, const std::string& name);
+
+/// Reconstruct all pipeline state
+/// @param device target device
+/// @param commandBuffer target command buffer
+/// @param streamState streamer data
+void ReconstructPipelineState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState);
+
+/// Reconstruct all push constant state
+/// @param device target device
+/// @param commandBuffer target command buffer
+/// @param streamState streamer data
+void ReconstructPushConstantState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState);
+
+/// Reconstruct all render pass state
+/// @param device target device
+/// @param commandBuffer target command buffer
+/// @param streamState streamer data
+void ReconstructRenderPassState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState);
+
+/// Reconstruct all command buffer state
+/// @param device target device
+/// @param commandBuffer target command buffer
+/// @param streamState streamer data
+/// @param flags reconstruction flags
+void ReconstructState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState, ReconstructionFlagSet flags);
 
 /// Hooks
 VKAPI_ATTR VkResult VKAPI_CALL Hook_vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkCommandPool *pCommandPool);
@@ -72,5 +129,7 @@ VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdSetEvent2(CommandBufferObject *commandB
 VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdWaitEvents2(CommandBufferObject *commandBuffer, uint32_t eventCount, const VkEvent *pEvents, const VkDependencyInfo *pDependencyInfos);
 VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdPipelineBarrier2(CommandBufferObject *commandBuffer, const VkDependencyInfo *pDependencyInfo);
 VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdDrawMeshTasksEXT(CommandBufferObject *commandBuffer, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ);
-VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectEXT(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride);
-VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectCountEXT(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount, uint32_t stride);
+VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectEXT(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride);
+VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectCountEXT(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount, uint32_t stride);
+VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdBeginDebugUtilsLabelEXT(CommandBufferObject *commandBuffer, const VkDebugUtilsLabelEXT* pLabelInfo);
+VKAPI_ATTR void     VKAPI_CALL Hook_vkCmdEndDebugUtilsLabelEXT(CommandBufferObject *commandBuffer);

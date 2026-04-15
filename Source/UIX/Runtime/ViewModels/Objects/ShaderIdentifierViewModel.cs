@@ -71,6 +71,24 @@ namespace Runtime.ViewModels.Objects
         }
 
         /// <summary>
+        /// Is this object active?
+        /// </summary>
+        public bool Active
+        {
+            get => _active;
+            set => this.RaiseAndSetIfChanged(ref _active, value);
+        }
+
+        /// <summary>
+        /// Is this object instrumented?
+        /// </summary>
+        public bool Instrumented
+        {
+            get => _instrumented;
+            set => this.RaiseAndSetIfChanged(ref _instrumented, value);
+        }
+
+        /// <summary>
         /// Given shader language
         /// </summary>
         public string Language
@@ -88,7 +106,7 @@ namespace Runtime.ViewModels.Objects
             {
                 return Workspace?.PropertyCollection
                     .GetProperty<IShaderCollectionViewModel>()?
-                    .GetPropertyWhere<ShaderViewModel>(x => x.Shader.GUID == Model.GUID)?
+                    .GetPropertyWhere<ShaderPropertyViewModel>(x => x.Shader.GUID == Model.GUID)?
                     .InstrumentationState ?? new InstrumentationState();   
             }
         }
@@ -132,10 +150,10 @@ namespace Runtime.ViewModels.Objects
             }
 
             // Find or create property
-            var shaderViewModel = shaderCollectionViewModel.GetPropertyWhere<ShaderViewModel>(x => x.Shader.GUID == Model.GUID);
+            var shaderViewModel = shaderCollectionViewModel.GetPropertyWhere<ShaderPropertyViewModel>(x => x.Shader.GUID == Model.GUID);
             if (shaderViewModel == null)
             {
-                shaderCollectionViewModel.Properties.Add(shaderViewModel = new ShaderViewModel()
+                shaderCollectionViewModel.Properties.Add(shaderViewModel = new ShaderPropertyViewModel()
                 {
                     Parent = shaderCollectionViewModel,
                     ConnectionViewModel = shaderCollectionViewModel.ConnectionViewModel,
@@ -151,5 +169,15 @@ namespace Runtime.ViewModels.Objects
         /// Internal language
         /// </summary>
         private string _language;
+
+        /// <summary>
+        /// Internal active state
+        /// </summary>
+        private bool _active;
+        
+        /// <summary>
+        /// Internal instrumented state
+        /// </summary>
+        private bool _instrumented;
     }
 }

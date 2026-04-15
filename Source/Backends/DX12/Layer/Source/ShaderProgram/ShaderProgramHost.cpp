@@ -38,6 +38,8 @@
 #include <Backends/DX12/Compiler/DXParseJob.h>
 #include <Backends/DX12/RootSignature.h>
 #include <Backends/DX12/States/RootSignatureLogicalMapping.h>
+#include <Backends/DX12/IL/DeviceCommandEmitter.h>
+#include <Backends/DX12/IL/DebugEmitter.h>
 
 // Backend
 #include <Backend/ShaderProgram/IShaderProgram.h>
@@ -59,8 +61,8 @@ bool ShaderProgramHost::Install() {
 
     // Prepare job
     DXParseJob job;
-    job.byteCode = reinterpret_cast<const uint32_t*>(kSPIRVInbuiltTemplateModuleD3D12);
-    job.byteLength = static_cast<uint32_t>(sizeof(kSPIRVInbuiltTemplateModuleD3D12));
+    job.byteCode = reinterpret_cast<const uint32_t*>(kInbuiltTemplateModuleD3D12);
+    job.byteLength = static_cast<uint32_t>(sizeof(kInbuiltTemplateModuleD3D12));
     job.pdbController = device->pdbController;
 
     // Attempt to parse template data
@@ -71,27 +73,11 @@ bool ShaderProgramHost::Install() {
     // Optional debug
     debug = registry->Get<ShaderCompilerDebug>();
 
+    // Install emitters
+    registry->AddNew<DeviceCommandFormat>();
+    registry->AddNew<DebugEmitter>(device);
+
     // OK
-    return true;
-}
-
-bool ShaderProgramHost::CreateRootSignature() {
-    D3D12_ROOT_SIGNATURE_DESC1 desc{};
-
-    // Not used
-    RootSignatureLogicalMapping logicalMapping;
-
-    // Instrument empty signature
-    ID3DBlob* blob;
-    if (FAILED(SerializeRootSignature(device, D3D_ROOT_SIGNATURE_VERSION_1_1, desc, &blob, &rootBindingInfo, &logicalMapping, &rootPhysicalMapping, nullptr))) {
-        return false;
-    }
-
-    // Create state
-    if (FAILED(device->object->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), __uuidof(ID3D12RootSignature), reinterpret_cast<void**>(&rootSignature)))) {
-        return false;
-    }
-
     return true;
 }
 
@@ -100,21 +86,16 @@ bool ShaderProgramHost::InstallPrograms() {
     auto dxilSigner = registry->Get<DXILSigner>();
     auto dxbcSigner = registry->Get<DXBCSigner>();
 
-    // Create shared root signature
-    if (!CreateRootSignature()) {
-        return false;
-    }
-
     // Get the export host
     auto shaderDataHost = registry->Get<ShaderDataHost>();
 
     // Get number of resources
     uint32_t resourceCount;
-    shaderDataHost->Enumerate(&resourceCount, nullptr, ShaderDataType::All);
+    shaderDataHost->EnumerateShader(&resourceCount, nullptr, ShaderDataType::AllGlobal);
 
     // Fill resources
     shaderData.resize(resourceCount);
-    shaderDataHost->Enumerate(&resourceCount, shaderData.data(), ShaderDataType::All);
+    shaderDataHost->EnumerateShader(&resourceCount, shaderData.data(), ShaderDataType::AllGlobal);
 
     // Get the export host
     auto exportHost = registry->Get<IShaderExportHost>();
@@ -128,6 +109,68 @@ bool ShaderProgramHost::InstallPrograms() {
         if (!entry.program) {
             continue;
         }
+        
+        // All local parameters
+        TrivialStackVector<D3D12_DESCRIPTOR_RANGE1, 4u> ranges;
+        TrivialStackVector<D3D12_ROOT_PARAMETER1,   4u> parameters;
+        
+        // Get number of bindings
+        uint32_t bindingsCount;
+        shaderDataHost->EnumerateProgram(entry.id, &bindingsCount, nullptr, ShaderDataType::BindingMask);
+
+        // Get bindings
+        std::vector<ShaderDataInfo> bindings(bindingsCount);
+        shaderDataHost->EnumerateProgram(entry.id, &bindingsCount, bindings.data(), ShaderDataType::BindingMask);
+        
+        // Any bindings?
+        if (bindingsCount) {
+            // Create ranges
+            for (uint32_t i = 0; i < bindingsCount; i++) {
+                const ShaderDataInfo& binding = bindings[i];
+                ranges.Add(D3D12_DESCRIPTOR_RANGE1 {
+                    .RangeType = binding.bufferBinding.isWritable ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
+                    .NumDescriptors = 1,
+                    .BaseShaderRegister = i,
+                    .RegisterSpace = 0,
+                    .Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+                    .OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND
+                });
+            }
+
+            // Fill root bindings
+            parameters.Add(D3D12_ROOT_PARAMETER1 {
+                .ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                .DescriptorTable = {
+                    .NumDescriptorRanges = static_cast<UINT>(ranges.Size()),
+                    .pDescriptorRanges = ranges.Data()
+                },
+                .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL
+            });
+        }
+
+        // Not used
+        RootSignatureLogicalMapping logicalMapping;
+
+        // Root description
+        D3D12_ROOT_SIGNATURE_DESC1 desc{};
+        desc.NumParameters = static_cast<UINT>(parameters.Size());
+        desc.pParameters   = parameters.Data();
+
+        // Instrument signature
+        ID3DBlob* blob;
+        if (FAILED(SerializeRootSignature(device, D3D_ROOT_SIGNATURE_VERSION_1_1, desc, &blob, &entry.rootBindingInfo, &logicalMapping, &entry.rootPhysicalMapping, nullptr))) {
+            return false;
+        }
+
+        // Set bindings space
+        entry.rootBindingInfo.bindings.space = 0;
+        entry.rootBindingInfo.bindings.shaderBindingResourceBaseRegister = 0;
+        entry.rootBindingInfo.bindings.shaderBindingResourceCount = bindingsCount;
+
+        // Create signature state
+        if (FAILED(device->object->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), __uuidof(ID3D12RootSignature), reinterpret_cast<void**>(&entry.rootSignature)))) {
+            return false;
+        }
 
         // Copy the template module
         entry.module = templateModule->Copy();
@@ -140,13 +183,18 @@ bool ShaderProgramHost::InstallPrograms() {
             shaderDataMap.Add(info);
         }
 
+        // Add bindings
+        for (const ShaderDataInfo& info : bindings) {
+            shaderDataMap.Add(info);
+        }
+
         // Finally, inject the host program
         entry.program->Inject(*entry.module->GetProgram());
 
         // Describe job
         DXCompileJob compileJob{};
-        compileJob.instrumentationKey.bindingInfo = rootBindingInfo;
-        compileJob.instrumentationKey.physicalMapping = rootPhysicalMapping;
+        compileJob.instrumentationKey.bindingInfo = entry.rootBindingInfo;
+        compileJob.instrumentationKey.physicalMapping = entry.rootPhysicalMapping;
         compileJob.streamCount = exportCount;
         compileJob.dxilSigner = dxilSigner;
         compileJob.dxbcSigner = dxbcSigner;
@@ -174,13 +222,28 @@ bool ShaderProgramHost::InstallPrograms() {
         D3D12_COMPUTE_PIPELINE_STATE_DESC computeDesc{};
         computeDesc.CS.pShaderBytecode = stream.GetData();
         computeDesc.CS.BytecodeLength = stream.GetByteSize();
-        computeDesc.pRootSignature = rootSignature;
+        computeDesc.pRootSignature = entry.rootSignature;
 
         // Finally, create the pipeline
         HRESULT result = device->object->CreateComputePipelineState(&computeDesc, __uuidof(ID3D12PipelineState), reinterpret_cast<void**>(&entry.pipeline));
         if (FAILED(result)) {
             return false;
         }
+    }
+        
+    D3D12_INDIRECT_ARGUMENT_DESC indirectCommandArgDesc{};
+    indirectCommandArgDesc.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    
+    // Setup signature desc
+    D3D12_COMMAND_SIGNATURE_DESC indirectCommandArg{};
+    indirectCommandArg.ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS);
+    indirectCommandArg.pArgumentDescs = &indirectCommandArgDesc;
+    indirectCommandArg.NumArgumentDescs = 1;
+    
+    // Try to create command signature
+    HRESULT result = device->object->CreateCommandSignature(&indirectCommandArg, nullptr, __uuidof(ID3D12CommandSignature), reinterpret_cast<void**>(&indirectCommandSignature));
+    if (FAILED(result)) {
+        return false;
     }
 
     // OK
@@ -201,6 +264,7 @@ ShaderProgramID ShaderProgramHost::Register(const ComRef<IShaderProgram> &progra
     // Populate entry
     ProgramEntry& entry = programs[id];
     entry.program = program;
+    entry.id = id;
 
     // OK
     return id;

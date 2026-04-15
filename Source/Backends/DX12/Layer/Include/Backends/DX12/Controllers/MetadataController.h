@@ -35,6 +35,9 @@
 // Bridge
 #include <Bridge/IBridgeListener.h>
 
+// Schemas
+#include <Schemas/ShaderMetadata.h>
+
 // Common
 #include <Common/ComRef.h>
 
@@ -47,6 +50,7 @@ class Registry;
 class Dispatcher;
 class IBridge;
 class ShaderCompiler;
+struct ShaderState;
 struct DeviceState;
 struct ReferenceObject;
 
@@ -68,6 +72,11 @@ public:
     /// Commit all changes
     void Commit();
 
+public:
+    /// Invoked on shader creation
+    /// \param state given state
+    void CreateShader(ShaderState* state);
+
 protected:
     /// Message handlers
     void OnMessage(const struct GetPipelineNameMessage& message);
@@ -79,6 +88,44 @@ protected:
     void OnMessage(const struct GetShaderUIDRangeMessage& message);
     void OnMessage(const struct GetPipelineUIDRangeMessage& message);
     void OnMessage(const struct GetShaderSourceMappingMessage& message);
+    void OnMessage(const struct ReleaseShaderMessage& message);
+    void OnMessage(const struct SetUseShaderExternalReferenceMessage& message);
+    void OnMessage(const struct GetPipelineStatusMessage& message);
+    void OnMessage(const struct GetShaderStatusMessage& message);
+    void OnMessage(const struct GetShaderInstructionMappingMessage& message);
+    void OnMessage(const struct GetShaderSourceInstructionMappingMessage& message);
+
+private:
+    struct DeferredJobData {
+        /// Shader we're processing
+        ShaderState* shader = nullptr;
+
+        /// Message to post
+        GetShaderCodeMessage message;
+    };
+
+    /// Initialize a module or defer it
+    template<typename T>
+    bool InitializeModuleDeferred(ShaderState* shader, const T& message, bool allowDeferred);
+
+    /// Initialize a module
+    void InitializeModule(ShaderState* shader);
+
+    /// Worker callbacks
+    void WorkerDeferredInitializeModule(void* userData);
+
+private:
+    /// Job lock
+    std::mutex jobMutex;
+
+    /// Current number of async jobs
+    std::atomic<uint32_t> jobCount = 0;
+
+    /// Last pooled job count
+    uint32_t lastPooledCount = 0;
+
+    /// All completed jobs
+    std::vector<DeferredJobData*> completedJobs;
 
 private:
     DeviceState* device;
@@ -88,6 +135,10 @@ private:
 
     /// Components
     ComRef<ShaderCompiler> shaderCompiler;
+    ComRef<Dispatcher> dispatcher;
+
+    /// If true, each shader has an external reference that must be released manually
+    bool useShaderExternalReference = false;
 
     /// Pending response stream
     MessageStream stream;

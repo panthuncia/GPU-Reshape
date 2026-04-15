@@ -14,8 +14,7 @@
         <StartupObject>Studio.Program</StartupObject>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <AssemblyName>GPUReshape</AssemblyName>
-        
-        
+        <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
 		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
     </PropertyGroup>
 
@@ -68,13 +67,12 @@
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.11.0-3.final" />
         <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.11.0-3.final" />
         <PackageReference Include="Microsoft.CodeAnalysis.Scripting.Common" Version="4.11.0-3.final" />
-        <PackageReference Include="Microsoft.Net.Compilers" Version="4.2.0">
-          <PrivateAssets>all</PrivateAssets>
-          <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-        </PackageReference>
         <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
         <PackageReference Include="Projektanker.Icons.Avalonia" Version="9.4.0" />
         <PackageReference Include="Projektanker.Icons.Avalonia.FontAwesome" Version="9.4.0" />
+        <PackageReference Include="Scriban" Version="6.1.0" />
+        <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
+        <PackageReference Include="System.IO.Hashing" Version="10.0.0-rc.2.25502.107" />
         <PackageReference Include="TextMateSharp" Version="1.0.56" />
         <PackageReference Include="TextMateSharp.Grammars" Version="1.0.56" />
     </ItemGroup>
@@ -135,7 +133,7 @@
         <DependentUpon>AboutWindow.axaml</DependentUpon>
         <SubType>Code</SubType>
       </Compile>
-      <Compile Update="Views\Shader\CodeShaderContentView.axaml.cs">
+      <Compile Update="Views\Shader\CodeContentView.axaml.cs">
         <DependentUpon>ShaderView.axaml</DependentUpon>
         <SubType>Code</SubType>
       </Compile>
@@ -153,10 +151,6 @@
       </Compile>
       <AvaloniaResource Include="Resources\Icons\Icon_NoFrame.png" />
       <AvaloniaResource Include="Resources\Icons\Icon_Frame.ico" />
-      <Compile Update="Views\Controls\LocatorViewHost.axaml.cs">
-        <DependentUpon>LocatorViewHost.axaml</DependentUpon>
-        <SubType>Code</SubType>
-      </Compile>
       <Compile Update="Views\PipelineFilterWindow.axaml.cs">
         <DependentUpon>CreatePipelineFilterWindow.axaml</DependentUpon>
         <SubType>Code</SubType>
@@ -268,6 +262,28 @@
       <AvaloniaResource Include="Resources\WhatsNew\Images\waterfall-feature-with-code.png" />
       <Compile Update="Views\Controls\MessageCollectionQueryView.axaml.cs">
         <DependentUpon>MessageCollectionQueryView.axaml</DependentUpon>
+        <SubType>Code</SubType>
+      </Compile>
+      <Compile Update="App\DesktopApp.axaml.cs">
+        <DependentUpon>App.axaml</DependentUpon>
+        <SubType>Code</SubType>
+      </Compile>
+      <None Remove="Resources\Render\StaticTemplate.scriban.html" />
+      <AvaloniaResource Include="Resources\Render\StaticTemplate.scriban.html" />
+      <Compile Update="Views\Workspace\Objects\GenericValidationDetailView.axaml.cs">
+        <DependentUpon>GenericValidationDetailView.axaml</DependentUpon>
+        <SubType>Code</SubType>
+      </Compile>
+      <Compile Update="Views\Documents\CodeView.axaml.cs">
+        <DependentUpon>CodeView.axaml</DependentUpon>
+        <SubType>Code</SubType>
+      </Compile>
+      <Compile Update="Views\Setting\SourceSettingView.axaml.cs">
+        <DependentUpon>SourceSettingView.axaml</DependentUpon>
+        <SubType>Code</SubType>
+      </Compile>
+      <Compile Update="Views\Status\IndexingStatusView.axaml.cs">
+        <DependentUpon>IndexingStatusView.axaml</DependentUpon>
         <SubType>Code</SubType>
       </Compile>
     </ItemGroup>

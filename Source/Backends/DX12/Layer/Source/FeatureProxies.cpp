@@ -39,6 +39,13 @@
 
 /// Check if a resource is volumetric
 static bool IsVolumetric(const ResourceState* state) {
+    // Null descriptors do not have an associated state
+    // TODO: Generally speaking we don't discern differently typed null descriptors, do we want to report
+    //       the assumed volumetrics of the creation parameters?
+    if (!state) {
+        return false;
+    }
+    
     return state->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
 }
 
@@ -860,4 +867,16 @@ void FeatureHook_CopyTiles::operator()(CommandListState *object, CommandContext 
     // Invoke proxies
     hook.Invoke(context, srcInfo, dstInfo);
 #endif // 0
+}
+
+void FeatureHook_ExecuteIndirect::operator()(CommandListState *object, CommandContext *context, ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgumentBuffer, UINT64 ArgumentBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset, ResourceState* DestArgumentResourceState) const {
+    CommandSignatureState* commandSignature = GetState(pCommandSignature);
+
+    // Invoke hook
+    hook.Invoke(
+        context,
+        GetResourceInfoFor(GetState(commandSignature->deviceCommandAllocation)),
+        GetResourceInfoFor(GetState(pArgumentBuffer)),
+        GetResourceInfoFor(DestArgumentResourceState)
+    );
 }

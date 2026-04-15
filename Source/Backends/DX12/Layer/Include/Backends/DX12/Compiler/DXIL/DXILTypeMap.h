@@ -70,6 +70,7 @@ public:
         out.indexLookup = indexLookup;
         out.typeLookup = typeLookup;
         out.namedLookup = namedLookup;
+        out.typeNameLookup = typeNameLookup;
     }
 
     /// Add a type
@@ -113,6 +114,7 @@ public:
 
         // Named mapping
         namedLookup[name] = type;
+        typeNameLookup[type] = name;
 
         // OK
         return type;
@@ -139,11 +141,12 @@ public:
         return id;
     }
 
-    /// Compile a named type
-    /// \param type given type, must be namable
-    /// \param name given name
+    /// Find a named type or add a new one
+    /// \param typeDecl expected declaration
+    /// \param name name of the type
+    /// \return type
     template<typename T>
-    const T* CompileNamedType(const T* type, const char* name) {
+    const T* FindNamedTypeOrAdd(const T& typeDecl, const char* name) {
         auto&& it = namedLookup.find(name);
 
         // Named types use name as key
@@ -155,6 +158,9 @@ public:
                 return it->second->As<T>();
             }
         }
+
+        // Not found, allocate the type
+        const T* type = programMap.AddUnsortedType(identifierMap.AllocID(), typeDecl);
 
         // Only certain named types
         switch (type->kind) {
@@ -168,6 +174,28 @@ public:
 
         // OK
         return type;
+    }
+
+    /// Add a named type, must be unique
+    /// \param typeDecl expected declaration
+    /// \param name name of the type
+    /// \return type
+    template<typename T>
+    const T* AddUniqueNamedType(const T& typeDecl, const char* name) {
+        ASSERT(!namedLookup.contains(name), "Duplicate unique named type");
+        return FindNamedTypeOrAdd(typeDecl, name);
+    }
+
+    /// Get the compiled name of a type
+    /// \param type type to lookup
+    /// \return nullptr if not found
+    std::string_view GetName(const Backend::IL::Type* type) {
+        auto it = typeNameLookup.find(type);
+        if (it == typeNameLookup.end()) {
+            return nullptr;
+        }
+
+        return it->second;
     }
 
     /// Find or compile a named type declaration
@@ -264,6 +292,12 @@ private:
     /// \param type given type
     /// \return true if non-canonical
     const bool IsNonCanonical(const Backend::IL::Type* type) {
+        // If it's already mapped, it's canonical
+        // Some exceptions apply, such as named types
+        if (HasType(type)) {
+            return false;
+        }
+        
         switch (type->kind) {
             default: {
                 return false;
@@ -312,6 +346,12 @@ private:
     /// \param type source type
     /// \return canonical type
     const Backend::IL::Type* GetCanonicalType(const Backend::IL::Type* type) {
+        // If it's already mapped, it's canonical
+        // Some exceptions apply, such as named types
+        if (HasType(type)) {
+            return type;
+        }
+        
         switch (type->kind) {
             default: {
                 ASSERT(false, "Invalid type");
@@ -603,6 +643,7 @@ private:
 
             // Store lookup
             namedLookup[name] = type;
+            typeNameLookup[type] = name;
         }
 
         // Get member uids
@@ -664,6 +705,7 @@ private:
 
     /// Named lookup table
     std::map<std::string, const Backend::IL::Type*> namedLookup;
+    std::map<const Backend::IL::Type*, std::string> typeNameLookup;
 
     /// IL type to DXIL type table
     Vector<uint32_t> typeLookup;

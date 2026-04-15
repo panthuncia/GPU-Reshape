@@ -29,11 +29,16 @@ using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Dock.Model.Core;
 using ReactiveUI;
+using Studio.Services;
 
 namespace Studio
 {
     public class ViewLocator : IDataTemplate
     {
+        // TODO: We need to replace this locator entirely
+        //       we already have a locator pattern that's much better,
+        //       migrate the remaining things.
+
         public Control Build(object data)
         {
             var name = data.GetType().FullName?.Replace("ViewModel", "View");
@@ -56,7 +61,8 @@ namespace Studio
             }
             else
             {
-                return new TextBlock { Text = "Not Found: " + name };
+                return ServiceRegistry.Get<ILocatorService>()?.InstantiateDerived<Control>(data) ?? 
+                       new TextBlock { Text = "Not Found: " + name };
             }
         }
 

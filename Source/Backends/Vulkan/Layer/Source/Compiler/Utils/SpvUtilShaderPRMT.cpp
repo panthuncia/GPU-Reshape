@@ -91,7 +91,7 @@ void SpvUtilShaderPRMT::CompileRecords(const SpvJob &job) {
     SpvInstruction &spvCounterSet = table.annotation.block->stream.Allocate(SpvOpDecorate, 4);
     spvCounterSet[1] = prmTableId;
     spvCounterSet[2] = SpvDecorationDescriptorSet;
-    spvCounterSet[3] = job.instrumentationKey.pipelineLayoutUserSlots;
+    spvCounterSet[3] = job.instrumentationKey.global.descriptorSet;
 
     // Binding
     SpvInstruction &spvCounterBinding = table.annotation.block->stream.Allocate(SpvOpDecorate, 4);
@@ -124,7 +124,7 @@ SpvUtilShaderPRMT::SpvPRMTOffset SpvUtilShaderPRMT::GetResourcePRMTOffset(const 
     DynamicSpvValueDecoration valueDecoration = GetSourceResourceDecoration(job, stream, function, resource);
 
     // Get the descriptor fed offset into the PRM table
-    IL::ID baseOffsetId = table.shaderDescriptorConstantData.GetDescriptorData(stream, valueDecoration.descriptorSet, kDescriptorDataOffsetDWord);
+    IL::ID baseOffsetId = table.shaderDescriptorConstantData.GetPRMDescriptorData(stream, valueDecoration.descriptorSet, kDescriptorDataOffsetDWord);
 
     // PRM index, DescriptorSetOffset + BindingOffset
     SpvInstruction& spv = stream.Allocate(SpvOpIAdd, 5);
@@ -155,7 +155,7 @@ SpvUtilShaderPRMT::SpvPRMTOffset SpvUtilShaderPRMT::GetResourcePRMTOffset(const 
         out.outOfBounds = table.scan.header.bound++;
 
         // Read length of the segment
-        IL::ID baseLengthId = table.shaderDescriptorConstantData.GetDescriptorData(stream, valueDecoration.descriptorSet, kDescriptorDataLengthDWord);
+        IL::ID baseLengthId = table.shaderDescriptorConstantData.GetPRMDescriptorData(stream, valueDecoration.descriptorSet, kDescriptorDataLengthDWord);
 
         // DynamicOffset >= Length
         SpvInstruction& spv = stream.Allocate(SpvOpUGreaterThanEqual, 5);

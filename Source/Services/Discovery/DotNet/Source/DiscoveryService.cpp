@@ -118,6 +118,9 @@ bool Discovery::CLR::DiscoveryService::StartBootstrappedProcess(const DiscoveryP
     nativeInfo.reservedToken = GlobalUID::FromString(static_cast<char *>(hGlobalReservedToken.ToPointer()));
     nativeInfo.captureChildProcesses = createInfo->captureChildProcesses;
     nativeInfo.attachAllDevices = createInfo->attachAllDevices;
+    nativeInfo.suspendDeferredInitialization = createInfo->suspendDeferredInitialization;
+    nativeInfo.waitForDebugger = createInfo->waitForDebugger;
+    nativeInfo.redirectPipes = createInfo->redirectPipes;
 
     // Convert environment to native
     for each (auto tuple in createInfo->environment) {
@@ -135,6 +138,8 @@ bool Discovery::CLR::DiscoveryService::StartBootstrappedProcess(const DiscoveryP
 
     // Convert to managed info
     info->processId = nativeProcessInfo.processId;
+    info->readPipe = nativeProcessInfo.readPipe;
+    info->writePipe = nativeProcessInfo.writePipe;
 
     // Cleanup paths
     Runtime::InteropServices::Marshal::FreeHGlobal(IntPtr(reinterpret_cast<int64_t>(nativeInfo.applicationPath)));

@@ -31,9 +31,28 @@ namespace Studio.Services
     public interface ISuspensionService
     {
         /// <summary>
+        /// Invoke a manual suspension
+        /// </summary>
+        void Suspend();
+        
+        /// <summary>
         /// Bind an object for type based suspension, members are bound to the cold storage for the underlying type
         /// </summary>
-        /// <param name="obj"></param>
         void BindTypedSuspension(INotifyPropertyChanged obj);
+
+        /// <summary>
+        /// Suspend the history of an object, stored with the given key
+        /// </summary>
+        void SuspendHistory(INotifyPropertyChanged obj, string key);
+        
+        /// <summary>
+        /// Recover the history of an object with a given key
+        /// </summary>
+        void RecoverHistory(INotifyPropertyChanged obj, string key);
+
+        /// <summary>
+        /// Get the existing history of an object
+        /// </summary>
+        string[] GetHistory(INotifyPropertyChanged obj);
     }
 }

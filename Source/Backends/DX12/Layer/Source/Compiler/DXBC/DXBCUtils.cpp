@@ -118,6 +118,145 @@ bool IsDXBCNative(const void *byteCode, uint64_t byteLength) {
     return true;
 }
 
+bool ScanDXBCShaderExports(const void *byteCode, uint64_t byteLength, TrivialStackVector<DXBCExport, 4u>& out) {
+    DXBCParseContext ctx(byteCode, byteLength);
+    
+    // Consume header
+    auto header = ctx.Consume<DXBCHeader>();
+    
+    // Must be DXBC
+    if (header.identifier != 'CBXD') {
+        return false;
+    }
+
+    // Handle all chunks
+    for (uint32_t chunkIndex = 0; chunkIndex < header.chunkCount; chunkIndex++) {
+        auto chunk = ctx.Consume<DXBCChunkEntryHeader>();
+
+        // Only care about RDAT
+        auto chunkHeader = ctx.ReadAt<DXBCChunkHeader>(chunk.offset);
+        if (chunkHeader->type != static_cast<uint32_t>(DXBCPhysicalBlockType::RuntimeData)) {
+            continue;
+        }
+
+        DXBCParseContext chunkCtx(ctx.ReadAt<void>(chunk.offset + sizeof(DXBCChunkHeader)), chunkHeader->size);
+
+        // Get header
+        auto rdatHeader = chunkCtx.Consume<DXBCRuntimeDataHeader>();
+
+        // Determine part offsets
+        TrivialStackVector<uint32_t, 8u> partOffsets;
+        for (uint32_t i = 0; i < rdatHeader.partCount; i++) {
+            partOffsets.Add(chunkCtx.Consume<uint32_t>());
+        }
+
+        // Buffers, RDAT is emitted in a specific order so it's always guaranteed to exist before
+        const char*     stringBufferStart = nullptr;
+        const uint8_t*  rawBufferStart    = nullptr;
+        const uint32_t* rawIndexStart     = nullptr;
+        
+        // Parse each part
+        for (uint32_t i = 0; i < rdatHeader.partCount; i++) {
+            chunkCtx.SetOffset(partOffsets[i]);
+
+            // Handle part type
+            auto partHeader = chunkCtx.Consume<DXBCRuntimeDataPartHeader>();
+            switch (partHeader.type) {
+                default: {
+                    break;
+                }
+                case DXBCRuntimeDataPartType::String: {
+                    stringBufferStart = chunkCtx.ReadAtOffset<const char>(0);
+                    break;
+                }
+                case DXBCRuntimeDataPartType::RawBytes: {
+                    rawBufferStart = chunkCtx.ReadAtOffset<const uint8_t>(0);
+                    break;
+                }
+                case DXBCRuntimeDataPartType::IndexArray: {
+                    rawIndexStart = chunkCtx.ReadAtOffset<const uint32_t>(0);
+                    break;
+                }
+                case DXBCRuntimeDataPartType::FunctionTable: {
+                    auto tableHeader = chunkCtx.Consume<DXBCRuntimeDataTableHeader>();
+
+                    // Find all functions
+                    for (uint64_t recordIdx = 0; recordIdx < partHeader.size / tableHeader.recordStride; recordIdx++) {
+                        auto record = chunkCtx.Get<DXBCRuntimeDataFunctionRecord>();
+
+                        // Always report it, regardless of kind
+                        DXBCExport &exportEntry = out.Add();
+                        exportEntry.unmangledName = stringBufferStart + record.unmangledNameOffset;
+                        exportEntry.type = DXBCType::Function;
+                        exportEntry.function.kind = record.shaderKind;
+                        exportEntry.function.mangledName = stringBufferStart + record.nameOffset;
+
+                        chunkCtx.Skip(tableHeader.recordStride);
+                    }
+                    break;
+                }
+                case DXBCRuntimeDataPartType::SubObjectTable: {
+                    auto tableHeader = chunkCtx.Consume<DXBCRuntimeDataTableHeader>();
+
+                    // Find all sub-objects
+                    for (uint64_t recordIdx = 0; recordIdx < partHeader.size / tableHeader.recordStride; recordIdx++) {
+                        auto record = chunkCtx.Get<DXBCRuntimeDataSubObjectRecord>();
+
+                        DXBCExport &exportEntry = out.Add();
+                        exportEntry.unmangledName = stringBufferStart + record.nameOffset;
+                        exportEntry.type = DXBCType::SubObject;
+                        exportEntry.subObject.subObjectKind = record.subObjectKind;
+
+                        // Fill sub-object descriptors
+                        switch (exportEntry.subObject.subObjectKind) {
+                            case DXBCRuntimeDataSubObjectKind::StateObjectConfig:
+                                std::memcpy(&exportEntry.subObject.config, &record.stateObjectConfig, sizeof(D3D12_STATE_OBJECT_CONFIG));
+                                break;
+                            case DXBCRuntimeDataSubObjectKind::GlobalRootSignature:
+                            case DXBCRuntimeDataSubObjectKind::LocalRootSignature:
+                                exportEntry.subObject.rootSignature.data = rawBufferStart + record.rootSignature.dataOffset;
+                                exportEntry.subObject.rootSignature.length = record.rootSignature.dataSize;
+                                break;
+                            case DXBCRuntimeDataSubObjectKind::SubObjectToExportsAssociation:
+                                exportEntry.subObject.subObjectToExportsAssociation.exportView = DXBCSubObjectAssociationView {
+                                    .stringStart = stringBufferStart,
+                                    .indices = rawIndexStart + record.subObjectToExportsAssociation.exportsStringOffset + 1,
+                                    .indexCount = rawIndexStart[record.subObjectToExportsAssociation.exportsStringOffset]
+                                };
+                                exportEntry.subObject.subObjectToExportsAssociation.subObject = stringBufferStart + record.subObjectToExportsAssociation.subObjectStringOffset;
+                                break;
+                            case DXBCRuntimeDataSubObjectKind::RaytracingShaderConfig:
+                                std::memcpy(&exportEntry.subObject.shaderConfig, &record.raytracingShaderConfig, sizeof(D3D12_RAYTRACING_SHADER_CONFIG));
+                                break;
+                            case DXBCRuntimeDataSubObjectKind::RaytracingPipelineConfig:
+                                std::memcpy(&exportEntry.subObject.pipelineConfig, &record.raytracingPipelineConfig, sizeof(D3D12_RAYTRACING_PIPELINE_CONFIG));
+                                break;
+                            case DXBCRuntimeDataSubObjectKind::HitGroup:
+                                exportEntry.subObject.hitGroup.type = record.hitGroup.type;
+                                exportEntry.subObject.hitGroup.intersectionExport = stringBufferStart + record.hitGroup.intersectionStringOffset;
+                                exportEntry.subObject.hitGroup.anyHitExport = stringBufferStart + record.hitGroup.anyHitStringOffset;
+                                exportEntry.subObject.hitGroup.closestHitExport = stringBufferStart + record.hitGroup.closestHitStringOffset;
+                                break;
+                            case DXBCRuntimeDataSubObjectKind::RaytracingPipelineConfig1:
+                                std::memcpy(&exportEntry.subObject.pipelineConfig1, &record.raytracingPipelineConfig1, sizeof(D3D12_RAYTRACING_PIPELINE_CONFIG1));
+                                break;
+                        }
+
+                        chunkCtx.Skip(tableHeader.recordStride);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // OK
+        return true;
+    }
+
+    // No matching block
+    return false;
+}
+
 static char PartAsHex(int32_t part) {
     if (part < 10) {
         return static_cast<char>('0' + part);

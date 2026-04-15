@@ -26,30 +26,37 @@
 
 using System;
 using Avalonia;
-using Avalonia.ReactiveUI;
 using Avalonia.Controls;
-using Avalonia.Controls.ApplicationLifetimes;
-using Projektanker.Icons.Avalonia;
-using Projektanker.Icons.Avalonia.FontAwesome;
+using Studio.App;
 
 namespace Studio
 {
     class Program
     {
         [STAThread]
-        private static void Main(string[] args)
+        private static int Main(string[] args)
         {
-            BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
+            // Any arguments?
+            if (args.Length > 0 && CliApp.IsCLI(args))
+            {
+                return CliApp.Build(args);
+            }
+            
+            // Otherwise assume desktop
+            return DesktopApp.Build(args);
         }
         
-        public static AppBuilder BuildAvaloniaApp()
+        /// <summary>
+        /// Design-time helper
+        /// </summary>
+        private static AppBuilder BuildAvaloniaApp()
         {
-            IconProvider.Current.Register<FontAwesomeIconProvider>();
+            if (!Design.IsDesignMode)
+            {
+                throw new Exception("Design-stub invoked in runtime");
+            }
             
-            return AppBuilder.Configure<App>()
-                .UseReactiveUI()
-                .UsePlatformDetect()
-                .LogToTrace();
+            return DesktopApp.BuildAvaloniaApp();
         }
     }
 }

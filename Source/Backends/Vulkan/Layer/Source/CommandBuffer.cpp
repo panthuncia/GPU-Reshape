@@ -34,9 +34,14 @@
 #include <Backends/Vulkan/Controllers/InstrumentationController.h>
 #include <Backends/Vulkan/Export/ShaderExportStreamer.h>
 #include <Backends/Vulkan/Resource/PhysicalResourceMappingTable.h>
+#include <Backends/Vulkan/Command/ReconstructionFlag.h>
+#include <Backends/Vulkan/States/RenderPassState.h>
+#include <Backends/Vulkan/IL/DeviceCommand.h>
+#include <Backends/Vulkan/States/BufferState.h>
+#include <Backends/Vulkan/Command/UserCommandBuffer.h>
 
 // Backend
-#include <Backends/Vulkan/Command/UserCommandBuffer.h>
+#include <Backend/IL/Execution/ExecutionInfo.h>
 #include <Backend/IFeature.h>
 
 // Common
@@ -90,6 +95,13 @@ void CreateDeviceCommandProxies(DeviceDispatchTable *table) {
             table->commandBufferDispatchTable.featureBitSetMask_vkCmdCopyBufferToImage2 |= (1ull << i);
             table->commandBufferDispatchTable.featureBitSetMask_vkCmdBlitImage |= (1ull << i);
         }
+
+        if (hookTable.writeResource.IsValid()) {
+            table->commandBufferDispatchTable.featureHooks_vkCmdUpdateBuffer[i] = hookTable.writeResource;
+            table->commandBufferDispatchTable.featureHooks_vkCmdFillBuffer[i] = hookTable.writeResource;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdUpdateBuffer |= (1ull << i);
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdFillBuffer |= (1ull << i);
+        }
         
         if (hookTable.resolveResource.IsValid()) {
             table->commandBufferDispatchTable.featureHooks_vkCmdResolveImage[i] = hookTable.resolveResource;
@@ -126,6 +138,23 @@ void CreateDeviceCommandProxies(DeviceDispatchTable *table) {
             table->commandBufferDispatchTable.featureHooks_vkCmdEndRenderingKHR[i] = hookTable.endRenderPass;
             table->commandBufferDispatchTable.featureBitSetMask_vkCmdEndRenderingKHR |= (1ull << i);
         }
+
+        if (hookTable.deviceCommand.IsValid()) {
+            table->commandBufferDispatchTable.featureHooks_vkCmdDispatchIndirect[i] = hookTable.deviceCommand;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdDispatchIndirect |= (1ull << i);
+            table->commandBufferDispatchTable.featureHooks_vkCmdDispatchIndirect[i] = hookTable.deviceCommand;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdDispatchIndirect |= (1ull << i);
+            table->commandBufferDispatchTable.featureHooks_vkCmdDrawIndirect[i] = hookTable.deviceCommand;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndirect |= (1ull << i);
+            table->commandBufferDispatchTable.featureHooks_vkCmdDrawIndexedIndirect[i] = hookTable.deviceCommand;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndexedIndirect |= (1ull << i);
+            table->commandBufferDispatchTable.featureHooks_vkCmdDrawIndirectCount[i] = hookTable.deviceCommand;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndirectCount |= (1ull << i);
+            table->commandBufferDispatchTable.featureHooks_vkCmdDrawIndexedIndirectCount[i] = hookTable.deviceCommand;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndexedIndirectCount |= (1ull << i);
+            table->commandBufferDispatchTable.featureHooks_vkCmdDrawMeshTasksIndirectEXT[i] = hookTable.deviceCommand;
+            table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawMeshTasksIndirectEXT |= (1ull << i);
+        }
     }
 }
 
@@ -157,6 +186,13 @@ void SetDeviceCommandFeatureSetAndCommit(DeviceDispatchTable *table, uint64_t fe
     table->commandBufferDispatchTable.featureBitSet_vkCmdEndRendering = table->commandBufferDispatchTable.featureBitSetMask_vkCmdEndRendering & featureSet;
     table->commandBufferDispatchTable.featureBitSet_vkCmdEndRenderingKHR = table->commandBufferDispatchTable.featureBitSetMask_vkCmdEndRenderingKHR & featureSet;
     table->commandBufferDispatchTable.featureBitSet_vkCmdDrawMeshTasksEXT = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawMeshTasksEXT & featureSet;
+    table->commandBufferDispatchTable.featureBitSet_vkCmdDispatchIndirect = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDispatchIndirect & featureSet;
+    table->commandBufferDispatchTable.featureBitSet_vkCmdDrawIndirect = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndirect & featureSet;
+    table->commandBufferDispatchTable.featureBitSet_vkCmdDrawIndexedIndirect = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndexedIndirect & featureSet;
+    table->commandBufferDispatchTable.featureBitSet_vkCmdDrawIndirectCount = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndirectCount & featureSet;
+    table->commandBufferDispatchTable.featureBitSet_vkCmdDrawIndexedIndirectCount = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawIndexedIndirectCount & featureSet;
+    table->commandBufferDispatchTable.featureBitSet_vkCmdDrawMeshTasksIndirectEXT = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawMeshTasksIndirectEXT & featureSet;
+    table->commandBufferDispatchTable.featureBitSet_vkCmdDrawMeshTasksIndirectCountEXT = table->commandBufferDispatchTable.featureBitSetMask_vkCmdDrawMeshTasksIndirectCountEXT & featureSet;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL Hook_vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkCommandPool *pCommandPool) {
@@ -322,7 +358,7 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdBindPipeline(CommandBufferObject *commandBu
     PipelineState *state = commandBuffer->table->states_pipeline.Get(pipeline);
 
     // Attempt to load the hot swapped object
-    VkPipeline hotSwapObject = state->hotSwapObject.load();
+    PipelineInstrument* hotSwapObject = state->hotSwapObject.load();
 
     // Conditionally wait for instrumentation if the pipeline has an outstanding request
     if (!hotSwapObject && state->HasInstrumentationRequest()) {
@@ -334,17 +370,54 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdBindPipeline(CommandBufferObject *commandBu
     
     // Replace the bound pipeline by the hot one
     if (hotSwapObject) {
-        pipeline = hotSwapObject;
+        pipeline = hotSwapObject->object;
     }
+
+    // Update last used
+    state->lastUsedTimestampNS.store(state->table->syncPointActionThread.GetLastTimeSinceEpochNS(), std::memory_order::relaxed);
 
     // Pass down callchain
     commandBuffer->dispatchTable.next_vkCmdBindPipeline(commandBuffer->object, pipelineBindPoint, pipeline);
 
     // Migrate environments
-    commandBuffer->table->exportStreamer->BindPipeline(commandBuffer->streamState, state, pipeline, hotSwapObject != nullptr, commandBuffer->object);
+    commandBuffer->table->exportStreamer->BindPipeline(commandBuffer->streamState, state, pipeline, hotSwapObject, commandBuffer->object);
 
     // Update context
     commandBuffer->context.pipeline = state;
+}
+
+static uint32_t AllocateRollingUID(DeviceDispatchTable* state) {
+    // Allocate the identifier, we never want zero as that's reserved
+    for (;;) {
+        if (uint32_t rollingUID = state->rollingUID++; rollingUID != 0) {
+            return rollingUID;
+        }
+    }
+}
+
+ExecutionInfo GetBaseExecutionInfo(CommandBufferObject* object, PipelineType type) {
+    const ShaderExportPipelineBindState& bindState = object->streamState->pipelineBindPoints[static_cast<uint32_t>(type)];
+    
+    // Default info
+    ExecutionInfo info{};
+
+    // Allocate the identifier, we never want zero as that's reserved
+    info.rollingExecutionUID = AllocateRollingUID(object->table);
+    info.rollingViewportUID  = object->streamState->renderPass.rollingUID;
+    
+    // Pipeline is optional
+    info.pipelineUID = bindState.pipeline ? static_cast<uint32_t>(bindState.pipeline->uid) : 0;
+
+    // Fill marker hashes
+    for (uint32_t i = 0; i < kMaxExecutionInfoMarkerCount; i++) {
+        if (i < object->streamState->markers.stack.Size()) {
+            info.markerHashes32[i] = object->streamState->markers.stack[i].hash32;
+        } else {
+            info.markerHashes32[i] = 0;
+        }
+    }
+    
+    return info;
 }
 
 static void CommitCompute(CommandBufferObject* commandBuffer) {
@@ -411,7 +484,44 @@ static void CommitGraphics(CommandBufferObject* commandBuffer) {
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL Hook_vkCmdBeginDebugUtilsLabelEXT(CommandBufferObject *commandBuffer, const VkDebugUtilsLabelEXT* pLabelInfo) {
+    // Just a plain string
+    commandBuffer->streamState->markers.stack.Add(ShaderExportStreamMarkerEntryState {
+        .hash32 = BufferCRC32Short(pLabelInfo->pLabelName, std::strlen(pLabelInfo->pLabelName))
+    });
+}
+
+VKAPI_ATTR void VKAPI_CALL Hook_vkCmdEndDebugUtilsLabelEXT(CommandBufferObject *commandBuffer) {
+    if (commandBuffer->streamState->markers.stack.Size()) {
+        commandBuffer->streamState->markers.stack.PopBack();
+    }
+}
+
+bool UsesExecutionInfo(CommandBufferObject* object, PipelineType type) {
+    const ShaderExportPipelineBindState& bindState = object->streamState->pipelineBindPoints[static_cast<uint32_t>(type)];
+    
+    // No instrument, no execution info
+    if (!bindState.pipelineInstrument) {
+        return false;
+    }
+
+    // Check if any shader in the pipeline uses execution info
+    return bindState.pipelineInstrument->featureTable.executionInfo;
+}
+
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDraw(CommandBufferObject *commandBuffer, uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw;
+        info.draw.drawFlags = ExecutionDrawFlag::VertexCountPerInstance | ExecutionDrawFlag::InstanceCount | ExecutionDrawFlag::StartVertex | ExecutionDrawFlag::StartInstance;
+        info.draw.vertexCountPerInstance = vertexCount;
+        info.draw.instanceCount = instanceCount;
+        info.draw.startVertex = firstVertex;
+        info.draw.startInstance = firstInstance;
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -420,6 +530,19 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDraw(CommandBufferObject *commandBuffer, ui
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndexed(CommandBufferObject *commandBuffer, uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw;
+        info.draw.drawFlags = ExecutionDrawFlag::IndexCountPerInstance | ExecutionDrawFlag::InstanceCount | ExecutionDrawFlag::StartIndex | ExecutionDrawFlag::VertexOffset | ExecutionDrawFlag::StartInstance;
+        info.draw.indexCountPerInstance = indexCount;
+        info.draw.instanceCount = instanceCount;
+        info.draw.startIndex = firstIndex;
+        info.draw.vertexOffset = vertexOffset;
+        info.draw.startInstance = firstInstance;
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -428,6 +551,14 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndexed(CommandBufferObject *commandBuf
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndirect(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw | ExecutionFlag::TypeIndirect;
+        info.draw.drawFlags = {};
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -436,6 +567,14 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndirect(CommandBufferObject *commandBu
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndexedIndirect(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw | ExecutionFlag::TypeIndirect;
+        info.draw.drawFlags = {};
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -444,6 +583,16 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndexedIndirect(CommandBufferObject *co
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDispatch(CommandBufferObject *commandBuffer, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Compute)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Compute);
+        info.executionFlags = ExecutionFlag::TypeDispatch;
+        info.dispatch.groupCountX = groupCountX;
+        info.dispatch.groupCountY = groupCountY;
+        info.dispatch.groupCountZ = groupCountZ;
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Compute, info);
+    }
+    
     // Commit all pending compute
     CommitCompute(commandBuffer);
 
@@ -452,6 +601,14 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDispatch(CommandBufferObject *commandBuffer
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksEXT(CommandBufferObject* commandBuffer, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw | ExecutionFlag::TypeIndirect;
+        info.draw.drawFlags = {};
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -460,6 +617,14 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksEXT(CommandBufferObject* comma
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectEXT(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, uint32_t drawCount, uint32_t stride) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw | ExecutionFlag::TypeIndirect;
+        info.draw.drawFlags = {};
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -468,6 +633,14 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectEXT(CommandBufferObjec
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectCountEXT(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount, uint32_t stride) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw | ExecutionFlag::TypeIndirect;
+        info.draw.drawFlags = {};
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -476,6 +649,16 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawMeshTasksIndirectCountEXT(CommandBuffer
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDispatchBase(CommandBufferObject *commandBuffer, uint32_t baseCountX, uint32_t baseCountY, uint32_t baseCountZ, uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Compute)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Compute);
+        info.executionFlags = ExecutionFlag::TypeDispatch;
+        info.dispatch.groupCountX = groupCountX;
+        info.dispatch.groupCountY = groupCountY;
+        info.dispatch.groupCountZ = groupCountZ;
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Compute, info);
+    }
+    
     // Commit all pending compute
     CommitCompute(commandBuffer);
 
@@ -483,15 +666,155 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDispatchBase(CommandBufferObject *commandBu
     commandBuffer->dispatchTable.next_vkCmdDispatchBase(commandBuffer->object, baseCountX, baseCountY, baseCountZ, groupCountX, groupCountY, groupCountZ);
 }
 
+static VkBuffer CreateAndApplyIndirectProxy(CommandBufferObject *commandBuffer, IL::DeviceCommandType type, VkBuffer buffer, VkDeviceSize offset, uint32_t argumentLength) {
+    BufferState* source = commandBuffer->table->states_buffer.Get(buffer);
+
+    // Allocate header
+    ShaderExportConstantAllocation headerAllocation = commandBuffer->streamState->constantAllocator.Allocate(
+        commandBuffer->table,
+        sizeof(DeviceCommandSignatureHeader)
+    );
+
+    // Allocate the actual command
+    ShaderExportDeviceAllocation commandAllocation = commandBuffer->streamState->deviceAllocator.Allocate(
+        commandBuffer->table,
+        sizeof(DeviceCommandEntry)
+    );
+
+    // Write header host data
+    auto header = static_cast<DeviceCommandSignatureHeader*>(headerAllocation.staging);
+    header->type = type;
+
+    // Setup the signature state
+    BufferState signatureState = {
+        .object = headerAllocation.buffer,
+        .virtualMapping = {
+            .token = {
+                .puid = commandBuffer->table->physicalResourceIdentifierMap.AllocatePUID(&signatureState)
+            }
+        }
+    };
+
+    // Setup the command state
+    BufferState destState = {
+        .object = commandAllocation.buffer,
+        .virtualMapping = {
+            .token = {
+                .puid = commandBuffer->table->physicalResourceIdentifierMap.AllocatePUID(&destState)
+            }
+        }
+    };
+
+    // Mark both as buffers
+    signatureState.type = ResourceStateType::Buffer;
+    destState.type      = ResourceStateType::Buffer;
+
+    // Wait for host and indirect reads
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    commandBuffer->dispatchTable.next_vkCmdPipelineBarrier(
+        commandBuffer->object,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0x0,
+        1, &barrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Copy over the previous device commands
+    VkBufferCopy copy{};
+    copy.dstOffset = 0;
+    copy.srcOffset = offset;
+    copy.size = argumentLength;
+    commandBuffer->dispatchTable.next_vkCmdCopyBuffer(
+        commandBuffer->object,
+        buffer, commandAllocation.buffer,
+        1u, &copy
+    );
+
+    // Wait for the transfer
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    commandBuffer->dispatchTable.next_vkCmdPipelineBarrier(
+        commandBuffer->object,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0x0,
+        1, &barrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Invoke proxies
+    if (ApplyFeatureHook<FeatureHook_vkCmdDispatchIndirect>(
+        commandBuffer,
+        &commandBuffer->userContext,
+        commandBuffer->dispatchTable.featureBitSet_vkCmdDispatchIndirect,
+        commandBuffer->dispatchTable.featureHooks_vkCmdDispatchIndirect,
+        source, &signatureState, &destState
+    )) {
+        // Commit all pending compute
+        CommitCompute(commandBuffer);
+    }
+
+    // Transition new device allocation over to indirect
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    commandBuffer->dispatchTable.next_vkCmdPipelineBarrier(
+        commandBuffer->object,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0x0,
+        1, &barrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Free optional view
+    if (signatureState.bindingView) {
+        commandBuffer->table->next_vkDestroyBufferView(commandBuffer->table->object, signatureState.bindingView, nullptr);
+    }
+
+    // Free optional view
+    if (destState.bindingView) {
+        commandBuffer->table->next_vkDestroyBufferView(commandBuffer->table->object, destState.bindingView, nullptr);
+    }
+
+    // Free the transient PUID's
+    commandBuffer->table->physicalResourceIdentifierMap.FreePUID(signatureState.virtualMapping.token.puid);
+    commandBuffer->table->physicalResourceIdentifierMap.FreePUID(destState.virtualMapping.token.puid);
+
+    // OK
+    return commandAllocation.buffer;
+}
+
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDispatchIndirect(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset) {
-    // Commit all pending compute
-    CommitCompute(commandBuffer);
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Compute)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Compute);
+        info.executionFlags = ExecutionFlag::TypeDispatch | ExecutionFlag::TypeIndirect;
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Compute, info);
+    }
+    
+    // If there's a proxy, we need to create the destination arguments
+    if (commandBuffer->dispatchTable.featureBitSet_vkCmdDispatchIndirect) {
+        buffer = CreateAndApplyIndirectProxy(commandBuffer, IL::DeviceCommandType::Dispatch, buffer, offset, sizeof(uint32_t) * 3u);
+        offset = 0;
+    }
 
     // Pass down callchain
     commandBuffer->dispatchTable.next_vkCmdDispatchIndirect(commandBuffer->object, buffer, offset);
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndirectCount(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount, uint32_t stride) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw;
+        info.draw.drawFlags = {};
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -500,6 +823,14 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndirectCount(CommandBufferObject *comm
 }
 
 VKAPI_ATTR void VKAPI_CALL Hook_vkCmdDrawIndexedIndirectCount(CommandBufferObject *commandBuffer, VkBuffer buffer, VkDeviceSize offset, VkBuffer countBuffer, VkDeviceSize countBufferOffset, uint32_t maxDrawCount, uint32_t stride) {
+    // Append execution info, if used
+    if (UsesExecutionInfo(commandBuffer, PipelineType::Graphics)) {
+        ExecutionInfo info = GetBaseExecutionInfo(commandBuffer, PipelineType::Graphics);
+        info.executionFlags = ExecutionFlag::TypeDraw;
+        info.draw.drawFlags = {};
+        commandBuffer->table->exportStreamer->SetExecutionInfo(commandBuffer->streamState, commandBuffer->object, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(commandBuffer);
 
@@ -529,6 +860,7 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdBeginRenderPass(CommandBufferObject* comman
 
     // Mark as inside
     commandBuffer->streamState->renderPass.insideRenderPass = true;
+    commandBuffer->streamState->renderPass.rollingUID       = AllocateRollingUID(commandBuffer->table);
 
     // Pass down callchain
     commandBuffer->dispatchTable.next_vkCmdBeginRenderPass(commandBuffer->object, info, contents);
@@ -674,6 +1006,128 @@ VKAPI_ATTR void VKAPI_CALL Hook_vkCmdPipelineBarrier2(CommandBufferObject* comma
 
     // Pass down callchain
     commandBuffer->dispatchTable.next_vkCmdPipelineBarrier2(commandBuffer->object, &dependencyInfo);
+}
+
+#ifndef NDEBUG
+void AddDebugStream(CommandBufferObject *commandBuffer, VkBuffer buffer, uint64_t offset, uint64_t length, const std::string &name) {
+    // Generic shader barrier
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    commandBuffer->dispatchTable.next_vkCmdPipelineBarrier(
+        commandBuffer->object,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+        0x0,
+        1, &barrier,
+        0, nullptr,
+        0, nullptr
+    );
+    
+    // Create a host side allocation for reads
+    ShaderExportConstantAllocation hostAllocation = commandBuffer->streamState->constantAllocator.Allocate(commandBuffer->table, length);
+
+    // General region
+    VkBufferCopy copy{};
+    copy.dstOffset = hostAllocation.offset;
+    copy.srcOffset = offset;
+    copy.size = length;
+
+    // Stage the data
+    commandBuffer->dispatchTable.next_vkCmdCopyBuffer(
+        commandBuffer->object,
+        buffer,
+        hostAllocation.buffer,
+        1, &copy
+    );
+    
+    // Add to pending streaming
+    commandBuffer->streamState->debugStreams.push_back(ShaderExportStreamStateDebugStream {
+        .name = name,
+        .mappedData = hostAllocation.staging,
+        .offset = 0,
+        .length = length
+    });
+}
+
+void AddDebugStream(CommandBufferObject* state, const ShaderExportDeviceAllocation& allocation, const std::string& name) {
+    AddDebugStream(state, allocation.buffer, 0, allocation.length, name);
+}
+#endif // NDEBUG
+
+void ReconstructPipelineState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState) {
+    ShaderExportPipelineBindState& bindState = streamState->pipelineBindPoints[static_cast<uint32_t>(PipelineType::Compute)];
+
+    // Bind the expected pipeline
+    if (bindState.pipeline) {
+        device->commandBufferDispatchTable.next_vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bindState.pipelineObject);
+
+        // Rebind the export, invalidated by layout compatibility
+        device->exportStreamer->BindShaderExport(streamState, bindState.pipeline, commandBuffer);
+
+        // Rebind all expected states
+        for (uint32_t i = 0; i < bindState.pipeline->layout->boundUserDescriptorStates; i++) {
+            const ShaderExportDescriptorState &descriptorState = bindState.persistentDescriptorState.at(i);
+
+            // Invalid or mismatched hash?
+            if (!descriptorState.set || bindState.pipeline->layout->compatabilityHashes[i] != descriptorState.compatabilityHash) {
+                continue;
+            }
+
+            // Bind the expected set
+            device->commandBufferDispatchTable.next_vkCmdBindDescriptorSets(
+                commandBuffer,
+                VK_PIPELINE_BIND_POINT_COMPUTE, bindState.pipeline->layout->object,
+                i, 1u, &descriptorState.set,
+                descriptorState.dynamicOffsets.count, descriptorState.dynamicOffsets.data);
+        }
+    }
+}
+
+void ReconstructPushConstantState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState) {
+    ShaderExportPipelineBindState& bindState = streamState->pipelineBindPoints[static_cast<uint32_t>(PipelineType::Compute)];
+
+    // Relevant bind state?
+    if (!bindState.pipeline || bindState.pipeline->layout->dataPushConstantLength == 0) {
+        return;
+    }
+
+    // Reconstruct the push constant data
+    device->commandBufferDispatchTable.next_vkCmdPushConstants(
+        commandBuffer,
+        bindState.pipeline->layout->object,
+        bindState.pipeline->layout->pushConstantRangeMask,
+        0u,
+        bindState.pipeline->layout->userPushConstantLength,
+        streamState->persistentPushConstantData.data()
+    );
+}
+
+void ReconstructRenderPassState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState) {
+    // Use the reconstruction object instead of native
+    VkRenderPassBeginInfo beginInfo = streamState->renderPass.deepCopy.createInfo;
+    beginInfo.renderPass = device->states_renderPass.Get(beginInfo.renderPass)->reconstructionObject;
+    
+    // Reconstruct render pass
+    device->commandBufferDispatchTable.next_vkCmdBeginRenderPass(
+        commandBuffer,
+        &beginInfo,
+        streamState->renderPass.subpassContents
+    );
+}
+
+void ReconstructState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState, ReconstructionFlagSet flags) {
+    if (flags & ReconstructionFlag::Pipeline) {
+        ReconstructPipelineState(device, commandBuffer, streamState);
+    }
+
+    if (flags & ReconstructionFlag::PushConstant) {
+        ReconstructPushConstantState(device, commandBuffer, streamState);
+    }
+
+    if (flags & ReconstructionFlag::RenderPass) {
+        ReconstructRenderPassState(device, commandBuffer, streamState);
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL Hook_vkEndCommandBuffer(CommandBufferObject *commandBuffer) {

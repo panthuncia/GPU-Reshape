@@ -9,6 +9,7 @@ inline SpvPhysicalBlockType GetSpvBlockType(SpvOp op) {
         default:
             return SpvPhysicalBlockType::Count;
         case SpvOpLine:
+        case SpvOpNoLine:
             return SpvPhysicalBlockType::TypeConstantVariable;
         case SpvOpFunction:
             return SpvPhysicalBlockType::Function;
@@ -54,5 +55,13 @@ inline void VisitSpvOperands(SpvOp op, const SpvId* words, uint32_t wordCount, F
         default:
             break;
 $OPERANDS
+    }
+}
+
+inline bool IsSpvTypeOp(SpvOp op) {
+    switch (op) {
+        default:
+            return false;
+$TYPES
     }
 }

@@ -31,7 +31,8 @@
 #include <Backends/DX12/DeepCopy.Gen.h>
 #include <Backends/DX12/InstrumentationInfo.h>
 #include <Backends/DX12/PipelineSubObjectWriter.h>
-#include "PipelineType.h"
+#include <Backends/DX12/States/PipelineType.h>
+#include <Backends/DX12/States/PipelineInstrument.h>
 
 // Common
 #include <Common/Containers/Vector.h>
@@ -53,7 +54,7 @@ struct ShaderState;
 static constexpr uint64_t kInvalidPipelineUID = ~0ull;
 
 struct __declspec(uuid("7C251A06-33FD-42DF-8850-40C1077FCAFE")) PipelineState : public ReferenceObject {
-    PipelineState(const Allocators& allocators) : shaders(allocators), subObjectWriter(allocators) {
+    PipelineState(const Allocators& allocators) : allocators(allocators), shaders(allocators), subObjectWriter(allocators) {
         
     }
     
@@ -65,16 +66,16 @@ struct __declspec(uuid("7C251A06-33FD-42DF-8850-40C1077FCAFE")) PipelineState : 
 
     /// Add an instrument to this module
     /// \param featureBitSet the enabled feature set
-    /// \param pipeline the pipeline in question
-    void AddInstrument(uint64_t featureBitSet, ID3D12PipelineState* pipeline) {
+    /// \param instrument the instrument in question
+    void AddInstrument(uint64_t featureBitSet, PipelineInstrument* instrument) {
         std::lock_guard lock(mutex);
-        instrumentObjects[featureBitSet] = pipeline;
+        instrumentObjects[featureBitSet] = instrument;
     }
 
     /// Get an instrument
     /// \param featureBitSet the enabled feature set
     /// \return nullptr if not found
-    ID3D12PipelineState* GetInstrument(uint64_t featureBitSet) {
+    PipelineInstrument* GetInstrument(uint64_t featureBitSet) {
         std::lock_guard lock(mutex);
         auto&& it = instrumentObjects.find(featureBitSet);
         if (it == instrumentObjects.end()) {
@@ -98,13 +99,19 @@ struct __declspec(uuid("7C251A06-33FD-42DF-8850-40C1077FCAFE")) PipelineState : 
 
     /// User pipeline
     ///  ! May be nullptr if the top pipeline has been destroyed
-    ID3D12PipelineState* object{nullptr};
+    IUnknown* object{nullptr};
 
     /// Type of this pipeline
     PipelineType type{PipelineType::None};
 
-    /// Replaced pipeline object, fx. instrumented version
-    std::atomic<ID3D12PipelineState*> hotSwapObject{nullptr};
+    /// Certain wrapped objects must remain native pass-through objects.
+    bool supportsInstrumentation{true};
+
+    /// Replaced instrument object
+    std::atomic<PipelineInstrument*> hotSwapObject;
+
+    /// Fully relaxed last-used timestamp
+    std::atomic<uint64_t> lastUsedTimestampNS{0};
 
     /// Signature for this pipeline
     RootSignatureState* signature{nullptr};
@@ -123,7 +130,7 @@ struct __declspec(uuid("7C251A06-33FD-42DF-8850-40C1077FCAFE")) PipelineState : 
 
     /// Instrumented objects lookup
     /// TODO: How do we manage lifetimes here?
-    std::map<uint64_t, ID3D12PipelineState*> instrumentObjects;
+    std::map<uint64_t, PipelineInstrument*> instrumentObjects;
 
     /// Optional pipeline stream blob
     PipelineSubObjectWriter subObjectWriter;
@@ -140,7 +147,6 @@ struct GraphicsPipelineState : public PipelineState {
     
     /// Creation deep copy, if invalid, present in stream blob
     D3D12GraphicsPipelineStateDescDeepCopy deepCopy;
-    
 
     /// Stage shaders
     ShaderState* vs{nullptr};

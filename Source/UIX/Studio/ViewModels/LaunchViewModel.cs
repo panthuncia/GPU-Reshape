@@ -32,7 +32,6 @@ using System.Linq;
 using System.Reactive;
 using System.Reactive.Linq;
 using System.Windows.Input;
-using Avalonia;
 using Avalonia.Threading;
 using Bridge.CLR;
 using Discovery.CLR;
@@ -40,6 +39,7 @@ using DynamicData;
 using Message.CLR;
 using ReactiveUI;
 using Runtime.ViewModels.Workspace.Properties;
+using Studio.App;
 using Studio.Models.Environment;
 using Studio.Models.Workspace;
 using Studio.Services;
@@ -48,6 +48,7 @@ using Studio.Utils.Workspace;
 using Studio.ViewModels.Controls;
 using Studio.ViewModels.Traits;
 using Studio.ViewModels.Workspace;
+using Studio.ViewModels.Workspace.Configurations;
 using Studio.ViewModels.Workspace.Properties;
 using Studio.ViewModels.Workspace.Properties.Config;
 
@@ -64,6 +65,16 @@ namespace Studio.ViewModels
         /// Open application settings
         /// </summary>
         public ICommand Settings { get; }
+
+        /// <summary>
+        /// The launched process information
+        /// </summary>
+        public DiscoveryProcessInfo DiscoveryProcessInfo => _discoveryProcessInfo;
+        
+        /// <summary>
+        /// The process startup environment message container
+        /// </summary>
+        public OrderedMessageView<ReadWriteMessageStream> MessageEnvironmentView { get; } = new(new ReadWriteMessageStream());
 
         /// <summary>
         /// Current connection string
@@ -134,6 +145,32 @@ namespace Studio.ViewModels
         }
 
         /// <summary>
+        /// Should we suspend the deferred initialization?
+        /// </summary>
+        [DataMember]
+        public bool SuspendDeferredInitialization
+        {
+            get => _suspendDeferredInitialization;
+            set => this.RaiseAndSetIfChanged(ref _suspendDeferredInitialization, value);
+        }
+
+        /// <summary>
+        /// Launch and wait for the debugger?
+        /// </summary>
+        [DataMember]
+        public bool WaitForDebugger
+        {
+            get => _waitForDebugger;
+            set => this.RaiseAndSetIfChanged(ref _waitForDebugger, value);
+        }
+        
+        /// <summary>
+        /// Optional, redirect all process pipes
+        /// Requires regular read/flushes
+        /// </summary>
+        public bool RedirectPipes { get; set; } = false;
+
+        /// <summary>
         /// The currently selected configuration
         /// </summary>
         public IWorkspaceConfigurationViewModel? SelectedConfiguration
@@ -180,6 +217,20 @@ namespace Studio.ViewModels
             {
                 this.RaiseAndSetIfChanged(ref _safeGuard, value);
                 OnSafeGuardChanged();
+            }
+        }
+
+        /// <summary>
+        /// Should the configuration use coverage reporting?
+        /// </summary>
+        [DataMember]
+        public bool Coverage
+        {
+            get => _coverage;
+            set
+            {
+                this.RaiseAndSetIfChanged(ref _coverage, value);
+                OnCoverageChanged();
             }
         }
 
@@ -265,6 +316,24 @@ namespace Studio.ViewModels
         public Interaction<Unit, bool> AcceptLaunch { get; }
 
         /// <summary>
+        /// Current history keys
+        /// </summary>
+        public string[] SuspensionHistoryKeys
+        {
+            get => _suspensionHistoryKeys;
+            set => this.RaiseAndSetIfChanged(ref _suspensionHistoryKeys, value);
+        }
+
+        /// <summary>
+        /// Selected history key
+        /// </summary>
+        public string SelectedHistoryKey
+        {
+            get => _selectedHistoryKey;
+            set => this.RaiseAndSetIfChanged(ref _selectedHistoryKey, value);
+        }
+
+        /// <summary>
         /// Can a launch be performed now?
         /// </summary>
         public bool CanLaunch
@@ -321,13 +390,23 @@ namespace Studio.ViewModels
                 .OnItemRemoved(x => Configurations.Remove(x))
                 .Subscribe();
 
-            // Suspension
-            this.BindTypedSuspension();
-
-            // Try getting configuration from suspension
-            if (!string.IsNullOrEmpty(SelectedConfigurationName))
+            // App suspension
+            if (!CliApp.IsActive)
             {
-                SelectedConfiguration = Configurations.FirstOrDefault(x => x.Name == SelectedConfigurationName);
+                // Suspension
+                this.BindTypedSuspension();
+
+                // Get history
+                SuspensionHistoryKeys = this.GetSuspensionHistory();
+
+                // Bind on key changes
+                this.WhenAnyValue(x => x.SelectedHistoryKey).Skip(1).Subscribe(this.RecoverSuspendedHistory);
+
+                // Try getting configuration from suspension
+                if (!string.IsNullOrEmpty(SelectedConfigurationName))
+                {
+                    SelectedConfiguration = Configurations.FirstOrDefault(x => x.Name == SelectedConfigurationName);
+                }
             }
             
             // Default selection
@@ -419,15 +498,13 @@ namespace Studio.ViewModels
             // Install on new workspace
             SelectedConfiguration.Install(WorkspaceViewModel);
 
-            // Force recording state?
-            if (SelectedConfiguration.Flags.HasFlag(WorkspaceConfigurationFlag.RequiresSynchronousRecording))
-            {
-                SynchronousRecording = true;
-            }
+            // Update all the flags
+            ApplyAndResetFlags();
             
             // Re-apply properties
             OnDetailChanged();
             OnSafeGuardChanged();
+            OnCoverageChanged();
             OnSynchronousRecordingChanged();
 
             // Get new description
@@ -438,6 +515,48 @@ namespace Studio.ViewModels
         }
 
         /// <summary>
+        /// Applies all implicit flags and handles configuration resets
+        /// </summary>
+        private void ApplyAndResetFlags()
+        {
+            if (SelectedConfiguration == null)
+            {
+                return;
+            }
+            
+            // If this is a custom workspace, reset misc states
+            if (SelectedConfiguration is CustomConfigurationViewModel)
+            {
+                SynchronousRecording = false;
+                Coverage = false;
+            }
+            
+            // Force recording state?
+            if (SelectedConfiguration.Flags.HasFlag(WorkspaceConfigurationFlag.RequiresSynchronousRecording))
+            {
+                SynchronousRecording = true;
+            }
+
+            // If safe-guarding isn't exposed, reset it
+            if (!SelectedConfiguration.Flags.HasFlag(WorkspaceConfigurationFlag.CanSafeGuard))
+            {
+                SafeGuard = false;
+            }
+            
+            // If detail isn't exposed, reset it
+            if (!SelectedConfiguration.Flags.HasFlag(WorkspaceConfigurationFlag.CanDetail))
+            {
+                Detail = false;
+            }
+            
+            // If texel addressing isn't exposed, reset it
+            if (!SelectedConfiguration.Flags.HasFlag(WorkspaceConfigurationFlag.CanUseTexelAddressing))
+            {
+                TexelAddressing = false;
+            }
+        }
+
+        /// <summary>
         /// Invoked on safe guarding changes
         /// </summary>
         private void OnSafeGuardChanged()
@@ -445,6 +564,17 @@ namespace Studio.ViewModels
             if ((WorkspaceViewModel.PropertyCollection as IInstrumentableObject)?.GetOrCreateInstrumentationProperty()?.GetProperty<InstrumentationConfigViewModel>() is {} config)
             {
                 config.SafeGuard = SafeGuard;
+            }
+        }
+
+        /// <summary>
+        /// Invoked on coverage changes
+        /// </summary>
+        private void OnCoverageChanged()
+        {
+            if ((WorkspaceViewModel.PropertyCollection as IInstrumentableObject)?.GetOrCreateInstrumentationProperty()?.GetProperty<InstrumentationConfigViewModel>() is {} config)
+            {
+                config.Coverage = Coverage;
             }
         }
 
@@ -489,6 +619,16 @@ namespace Studio.ViewModels
             {
                 return;
             }
+            
+            // App suspension
+            if (!CliApp.IsActive)
+            {
+                // Suspend all properties for this one
+                this.SuspendHistory(_applicationPath);
+
+                // Get history
+                SuspensionHistoryKeys = this.GetSuspensionHistory();
+            }
 
             // Prevent launches for now
             _canLaunch = false;
@@ -504,6 +644,9 @@ namespace Studio.ViewModels
             processInfo.reservedToken = _pendingReservedToken;
             processInfo.captureChildProcesses = _captureChildProcesses;
             processInfo.attachAllDevices = _attachAllDevices;
+            processInfo.suspendDeferredInitialization = _suspendDeferredInitialization;
+            processInfo.waitForDebugger = _waitForDebugger;
+            processInfo.redirectPipes = RedirectPipes;
 
             // Parse environment
             processInfo.environment = new(EnvironmentParser.Parse(_environment).Select(kv => Tuple.Create(kv.Key, kv.Value)));
@@ -513,14 +656,11 @@ namespace Studio.ViewModels
             {
                 processInfo.workingDirectoryPath = Path.GetDirectoryName(processInfo.applicationPath);
             }
-
-            // Create environment view
-            var view = new OrderedMessageView<ReadWriteMessageStream>(new ReadWriteMessageStream());
             
             // Construct virtual redirects
             foreach ((string? key, int value) in _virtualFeatureMappings)
             {
-                SetVirtualFeatureRedirectMessage message = view.Add<SetVirtualFeatureRedirectMessage>(new SetVirtualFeatureRedirectMessage.AllocationInfo
+                SetVirtualFeatureRedirectMessage message = MessageEnvironmentView.Add<SetVirtualFeatureRedirectMessage>(new SetVirtualFeatureRedirectMessage.AllocationInfo
                 {
                     nameLength = (ulong)key.Length
                 });
@@ -533,14 +673,18 @@ namespace Studio.ViewModels
             // Commit all pending objects
             if (WorkspaceViewModel.PropertyCollection.GetService<IBusPropertyService>() is { } busPropertyService)
             {
-                busPropertyService.CommitRedirect(view, false);
+                busPropertyService.CommitRedirect(MessageEnvironmentView, false);
             }
 
             // Add all global options
-            AppendGlobalConfig(view);
+            AppendGlobalConfig(MessageEnvironmentView);
             
             // Start process
-            service.StartBootstrappedProcess(processInfo, view.Storage, ref _discoveryProcessInfo);
+            if (!service.StartBootstrappedProcess(processInfo, MessageEnvironmentView.Storage, ref _discoveryProcessInfo))
+            {
+                ConnectionStatus = ConnectionStatus.FailedLaunch;
+                return;
+            }
             
             // Start connection
             _connectionViewModel.Connect("127.0.0.1", null);
@@ -703,13 +847,30 @@ namespace Studio.ViewModels
                 // Create workspace
                 var workspace = new ViewModels.Workspace.WorkspaceViewModel()
                 {
-                    Connection = _connectionViewModel
+                    Connection = _connectionViewModel,
+                    Configuration = SelectedConfiguration,
+                    LaunchState = CreateLaunchState()
                 };
                 
                 // Configure and register workspace
                 provider?.Install(workspace);
                 provider?.Add(workspace, true);
             });
+        }
+
+        /// <summary>
+        /// Create a launch state
+        /// </summary>
+        public WorkspaceLaunchState? CreateLaunchState()
+        {
+            return new()
+            {
+                Coverage = Coverage,
+                Detail = Detail,
+                SafeGuard = SafeGuard,
+                SynchronousRecording = SynchronousRecording,
+                TexelAddressing = TexelAddressing
+            };
         }
 
         /// <summary>
@@ -881,11 +1042,26 @@ namespace Studio.ViewModels
         /// Internal attach all devices state
         /// </summary>
         private bool _attachAllDevices;
+
+        /// <summary>
+        /// Internal suspend state
+        /// </summary>
+        private bool _suspendDeferredInitialization;
+
+        /// <summary>
+        /// Internal wait state
+        /// </summary>
+        private bool _waitForDebugger;
         
         /// <summary>
         /// Internal safe guard state
         /// </summary>
         private bool _safeGuard;
+
+        /// <summary>
+        /// Internal coverage state
+        /// </summary>
+        private bool _coverage;
 
         /// <summary>
         /// Internal detail state
@@ -911,5 +1087,15 @@ namespace Studio.ViewModels
         /// Instantiated process info
         /// </summary>
         private DiscoveryProcessInfo _discoveryProcessInfo = new();
+
+        /// <summary>
+        /// Internal history keys
+        /// </summary>
+        private string[] _suspensionHistoryKeys;
+        
+        /// <summary>
+        /// Internal key selection
+        /// </summary>
+        private string _selectedHistoryKey;
     }
 }

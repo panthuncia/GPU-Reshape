@@ -29,7 +29,7 @@ using Studio.ViewModels.Workspace.Properties;
 
 namespace Studio.ViewModels.Workspace.Objects
 {
-    public class NoDetailViewModel : ReactiveObject, IValidationDetailViewModel
+    public class NoDetailViewModel : ReactiveObject, ISourceObjectDetailViewModel
     {
         /// <summary>
         /// Workspace within this overview

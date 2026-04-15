@@ -71,6 +71,38 @@ namespace Studio.ViewModels.Workspace.Properties.Config
                 this.EnqueueFirstParentBus();
             }
         }
+        
+        /// <summary>
+        /// Enables traceback instrumentation
+        /// </summary>
+        [PropertyField]
+        [Category("Instrumentation")]
+        [Description("Enables traceback of the program that produced the validation message, including thread indices")]
+        public bool ProgramTraceback
+        {
+            get => _traceback;
+            set
+            {
+                this.RaiseAndSetIfChanged(ref _traceback, value);
+                this.EnqueueFirstParentBus();
+            }
+        }
+        
+        /// <summary>
+        /// Enables detailed instrumentation
+        /// </summary>
+        [PropertyField]
+        [Category("Instrumentation")]
+        [Description("Enables coverage reporting, affects performance, catches more issues but limits streaming per shader location")]
+        public bool Coverage
+        {
+            get => _coverage;
+            set
+            {
+                this.RaiseAndSetIfChanged(ref _coverage, value);
+                this.EnqueueFirstParentBus();
+            }
+        }
 
         /// <summary>
         /// Constructor
@@ -87,7 +119,7 @@ namespace Studio.ViewModels.Workspace.Properties.Config
         public void Commit(InstrumentationState state)
         {
             // Reduce stream size if not needed
-            if (!_safeGuard && !_detail)
+            if (!_safeGuard && !_detail && !_coverage && !_traceback)
             {
                 return;
             }
@@ -96,6 +128,8 @@ namespace Studio.ViewModels.Workspace.Properties.Config
             var request = state.GetOrDefault<SetInstrumentationConfigMessage>();
             request.safeGuard |= _safeGuard ? 1 : 0;
             request.detail |= _detail ? 1 : 0;
+            request.validationCoverage |= _coverage ? 1 : 0;
+            request.traceback |= _traceback ? 1 : 0;
         }
 
         /// <summary>
@@ -107,5 +141,15 @@ namespace Studio.ViewModels.Workspace.Properties.Config
         /// Internal detail state
         /// </summary>
         private bool _detail = false;
+
+        /// <summary>
+        /// Internal traceback state
+        /// </summary>
+        private bool _traceback = false;
+
+        /// <summary>
+        /// Internal coverage state
+        /// </summary>
+        private bool _coverage = false;
     }
 }

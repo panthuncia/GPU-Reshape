@@ -34,81 +34,9 @@
 #include <Backends/Vulkan/ShaderProgram/ShaderProgramHost.h>
 #include <Backends/Vulkan/Export/ShaderExportStreamer.h>
 #include <Backends/Vulkan/ShaderData/ShaderDataHost.h>
-
-static void ReconstructPipelineState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState, const UserCommandState& state) {
-    ShaderExportPipelineBindState& bindState = streamState->pipelineBindPoints[static_cast<uint32_t>(PipelineType::Compute)];
-
-    // Bind the expected pipeline
-    if (bindState.pipeline) {
-        device->commandBufferDispatchTable.next_vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, bindState.pipelineObject);
-
-        // Rebind the export, invalidated by layout compatibility
-        device->exportStreamer->BindShaderExport(streamState, bindState.pipeline, commandBuffer);
-
-        // Rebind all expected states
-        for (uint32_t i = 0; i < bindState.pipeline->layout->boundUserDescriptorStates; i++) {
-            const ShaderExportDescriptorState &descriptorState = bindState.persistentDescriptorState.at(i);
-
-            // Invalid or mismatched hash?
-            if (!descriptorState.set || bindState.pipeline->layout->compatabilityHashes[i] != descriptorState.compatabilityHash) {
-                continue;
-            }
-
-            // Bind the expected set
-            device->commandBufferDispatchTable.next_vkCmdBindDescriptorSets(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_COMPUTE, bindState.pipeline->layout->object,
-                i, 1u, &descriptorState.set,
-                descriptorState.dynamicOffsets.count, descriptorState.dynamicOffsets.data);
-        }
-    }
-}
-
-static void ReconstructPushConstantState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState, const UserCommandState& state) {
-    ShaderExportPipelineBindState& bindState = streamState->pipelineBindPoints[static_cast<uint32_t>(PipelineType::Compute)];
-
-    // Relevant bind state?
-    if (!bindState.pipeline || bindState.pipeline->layout->dataPushConstantLength == 0) {
-        return;
-    }
-
-    // Reconstruct the push constant data
-    device->commandBufferDispatchTable.next_vkCmdPushConstants(
-        commandBuffer,
-        bindState.pipeline->layout->object,
-        bindState.pipeline->layout->pushConstantRangeMask,
-        0u,
-        bindState.pipeline->layout->userPushConstantLength,
-        streamState->persistentPushConstantData.data()
-    );
-}
-
-static void ReconstructRenderPassState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState, const UserCommandState& state) {
-    // Use the reconstruction object instead of native
-    VkRenderPassBeginInfo beginInfo = streamState->renderPass.deepCopy.createInfo;
-    beginInfo.renderPass = device->states_renderPass.Get(beginInfo.renderPass)->reconstructionObject;
-    
-    // Reconstruct render pass
-    device->commandBufferDispatchTable.next_vkCmdBeginRenderPass(
-        commandBuffer,
-        &beginInfo,
-        streamState->renderPass.subpassContents
-    );
-}
-
-static void ReconstructState(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, ShaderExportStreamState* streamState, const UserCommandState& state) {
-    if (state.reconstructionFlags & ReconstructionFlag::Pipeline) {
-        ReconstructPipelineState(device, commandBuffer, streamState, state);
-    }
-
-    if (state.reconstructionFlags & ReconstructionFlag::PushConstant) {
-        ReconstructPushConstantState(device, commandBuffer, streamState, state);
-    }
-
-    if (state.reconstructionFlags & ReconstructionFlag::RenderPass) {
-        ReconstructRenderPassState(device, commandBuffer, streamState, state);
-    }
-}
+#include <Backends/Vulkan/CommandBuffer.h>
+#include <Backends/Vulkan/States/BufferState.h>
+#include <Backends/Vulkan/States/ResourceState.h>
 
 void CommitCommands(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, const CommandBuffer& buffer, ShaderExportStreamState* streamState) {
     UserCommandState state;
@@ -242,10 +170,10 @@ void CommitCommands(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, 
                 // Actual length of the data
                 size_t length = cmd->commandSize - sizeof(StageBufferCommand);
 
-                // Shader Read -> Transfer Write
+                // Shader Read/Write -> Transfer Write
                 VkBufferMemoryBarrier barrier{};
                 barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-                barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
                 barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
                 barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -272,9 +200,9 @@ void CommitCommands(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, 
                     reinterpret_cast<const uint8_t*>(cmd) + sizeof(StageBufferCommand)
                 );
 
-                // Transfer Write -> Shader Read
+                // Transfer Write -> Shader Read/Write
                 barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
                 // Stall the pipeline
                 device->commandBufferDispatchTable.next_vkCmdPipelineBarrier(
@@ -303,16 +231,205 @@ void CommitCommands(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, 
                 );
                 break;
             }
-            case CommandType::Dispatch: {
-                auto* cmd = command.As<DispatchCommand>();
+            case CommandType::CopyBuffer: {
+                auto* cmd = command.As<CopyBufferCommand>();
 
-                // Invoke program
-                device->commandBufferDispatchTable.next_vkCmdDispatch(
+                // Get the data buffer
+                VkBuffer sourceBuffer = device->dataHost->GetResourceBuffer(cmd->source);
+                VkBuffer destBuffer   = device->dataHost->GetResourceBuffer(cmd->dest);
+
+                VkBufferCopy copyRegion{};
+                copyRegion.srcOffset = cmd->sourceOffset;
+                copyRegion.dstOffset = cmd->destOffset;
+                copyRegion.size = cmd->byteCount;
+
+                device->commandBufferDispatchTable.next_vkCmdCopyBuffer(
                     commandBuffer,
-                    cmd->groupCountX,
-                    cmd->groupCountY,
-                    cmd->groupCountZ
+                    sourceBuffer, destBuffer,
+                    1u, &copyRegion
                 );
+                break;
+            }
+            case CommandType::SetResource: {
+                auto *cmd = command.As<SetResourceCommand>();
+
+                // Get the binding index
+                uint32_t bindingIndex = device->dataHost->GetBindingIndex(state.shaderProgramID, cmd->id);
+
+                // Lazy allocate
+                if (bindingIndex >= state.shaderProgramBindings.Size()) {
+                    state.shaderProgramBindings.Resize(bindingIndex + 1);
+                }
+
+                // Get state
+                auto *resourceState = static_cast<BufferState*>(device->physicalResourceIdentifierMap.GetState(cmd->puid));
+
+                // Lazily create a view for it
+                if (!resourceState->bindingView) {
+                    VkBufferViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO};
+                    viewInfo.buffer = resourceState->object;
+                    viewInfo.format = VK_FORMAT_R32_UINT;
+                    viewInfo.range = VK_WHOLE_SIZE;
+                    device->next_vkCreateBufferView(device->object, &viewInfo, nullptr, &resourceState->bindingView);
+                }
+
+                // Set binding
+                state.shaderProgramBindings[bindingIndex] = UserBinding {
+                    .bufferView = resourceState->bindingView
+                };
+                break;
+            }
+            case CommandType::SetResourceData: {
+                auto *cmd = command.As<SetResourceDataCommand>();
+
+                // Get the binding index
+                uint32_t bindingIndex = device->dataHost->GetBindingIndex(state.shaderProgramID, cmd->id);
+
+                // Lazy allocate
+                if (bindingIndex >= state.shaderProgramBindings.Size()) {
+                    state.shaderProgramBindings.Resize(bindingIndex + 1);
+                }
+                
+                // Get the data buffer
+                VkBufferView sourceBufferView = device->dataHost->GetResourceBufferView(cmd->buffer, VK_FORMAT_R32_UINT);
+
+                // Set binding
+                state.shaderProgramBindings[bindingIndex] = UserBinding {
+                    .bufferView = sourceBufferView
+                };
+                break;
+            }
+            case CommandType::BeginPredicate: {
+                auto* cmd = command.As<BeginPredicateCommand>();
+                VkBuffer predicateBuffer = device->dataHost->GetResourceBuffer(cmd->buffer);
+
+                // Generic barrier
+                VkBufferMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT;
+                barrier.buffer = predicateBuffer;
+                barrier.offset = cmd->offset;
+                barrier.size = sizeof(uint32_t);
+                device->commandBufferDispatchTable.next_vkCmdPipelineBarrier(
+                    commandBuffer,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                    0x0,
+                    0, nullptr,
+                    1, &barrier,
+                    0, nullptr
+                );
+                
+                // Standard, execute if set
+                VkConditionalRenderingBeginInfoEXT beginInfo{VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT};
+                beginInfo.buffer = predicateBuffer;
+                beginInfo.offset = cmd->offset;
+                
+                device->commandBufferDispatchTable.next_vkCmdBeginConditionalRenderingEXT(
+                    commandBuffer,
+                    &beginInfo
+                );
+                break;
+            }
+            case CommandType::EndPredicate: {
+                auto* cmd = command.As<EndPredicateCommand>();
+                device->commandBufferDispatchTable.next_vkCmdEndConditionalRenderingEXT(commandBuffer);
+                break;
+            }
+            case CommandType::Dispatch: 
+            case CommandType::DispatchIndirect: {
+                // Any resources to set?
+                if (state.shaderProgramBindings.Size()) {
+                    // Number of bindings
+                    uint32_t bindingCount = 0;
+                    device->dataHost->EnumerateProgram(state.shaderProgramID, &bindingCount, nullptr, ShaderDataType::BindingMask);
+
+                    // Get all program bindings
+                    std::vector<ShaderDataInfo> bindings(bindingCount);
+                    device->dataHost->EnumerateProgram(state.shaderProgramID, &bindingCount, bindings.data(), ShaderDataType::BindingMask);
+
+                    // We're expecting them all to be bound
+                    ASSERT(bindingCount == state.shaderProgramBindings.Size(), "Unexpected binding count");
+
+                    // Allocate the descriptor set dynamically
+                    VkDescriptorSet allocation = streamState->freeDescriptorAllocator.Allocate(device->shaderProgramHost->GetDescriptorSetLayout(state.shaderProgramID));
+                    {
+                        TrivialStackVector<VkWriteDescriptorSet, 4u> vkWriteDescriptorSet;
+
+                        // Populate all bindings
+                        for (size_t i = 0; i < bindingCount; i++) {
+                            UserBinding &binding = state.shaderProgramBindings[i];
+
+                            // Shader wise data info
+                            const ShaderDataInfo& dataInfo = bindings[i];
+                            ASSERT(dataInfo.bufferBinding.format == Backend::IL::Format::R32UInt, "Unsupported type");
+                            
+                            // Storage?
+                            if (dataInfo.bufferBinding.isWritable) {
+                                vkWriteDescriptorSet.Add(VkWriteDescriptorSet {
+                                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                    .dstSet = allocation,
+                                    .dstBinding = static_cast<uint32_t>(i),
+                                    .descriptorCount = 1,
+                                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,
+                                    .pTexelBufferView = &binding.bufferView
+                                });
+                            } else {
+                                vkWriteDescriptorSet.Add(VkWriteDescriptorSet {
+                                    .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                    .dstSet = allocation,
+                                    .dstBinding = static_cast<uint32_t>(i),
+                                    .descriptorCount = 1,
+                                    .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,
+                                    .pTexelBufferView = &binding.bufferView
+                                });
+                            }
+                        }
+
+                        // Finally, update the descriptor set
+                        device->next_vkUpdateDescriptorSets(
+                            device->object,
+                            static_cast<uint32_t>(vkWriteDescriptorSet.Size()), vkWriteDescriptorSet.Data(),
+                            0u, nullptr
+                        );
+                    }
+
+                    // Bind the set
+                    device->commandBufferDispatchTable.next_vkCmdBindDescriptorSets(
+                        commandBuffer,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        device->shaderProgramHost->GetPipelineLayout(state.shaderProgramID),
+                        1, 1, &allocation,
+                        0, nullptr
+                    );
+
+                    // Clear last bindings
+                    state.shaderProgramBindings.Clear();
+                }
+                
+                // Invoke
+                if (static_cast<CommandType>(command.commandType) == CommandType::DispatchIndirect) {
+                    auto* cmd = command.As<DispatchIndirectCommand>();
+
+                    VkBuffer indirectBuffer = device->dataHost->GetResourceBuffer(cmd->buffer);
+
+                    // Invoke program
+                    device->commandBufferDispatchTable.next_vkCmdDispatchIndirect(
+                        commandBuffer,
+                        indirectBuffer,
+                        cmd->offset
+                    );
+                } else {
+                    auto* cmd = command.As<DispatchCommand>();
+
+                    // Invoke program
+                    device->commandBufferDispatchTable.next_vkCmdDispatch(
+                        commandBuffer,
+                        cmd->groupCountX,
+                        cmd->groupCountY,
+                        cmd->groupCountZ
+                    );
+                }
                 break;
             }
             case CommandType::UAVBarrier: {
@@ -334,9 +451,8 @@ void CommitCommands(DeviceDispatchTable* device, VkCommandBuffer commandBuffer, 
         }
     }
 
-
     // Reconstruct expected user state
-    ReconstructState(device, commandBuffer, streamState, state);
+    ReconstructState(device, commandBuffer, streamState, state.reconstructionFlags);
 }
 
 void CommitCommands(CommandBufferObject* commandBuffer) {

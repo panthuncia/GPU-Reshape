@@ -25,10 +25,10 @@
 // 
 
 #include <Backends/DX12/Device.h>
+#include <Backends/DX12/DeviceStateVote.h>
+#include <Backends/DX12/DeviceProperties.h>
 #include <Backends/DX12/Resource.h>
-#include <Backends/DX12/Fence.h>
-#include <Backends/DX12/RootSignature.h>
-#include <Backends/DX12/Pipeline.h>
+#include <Backends/DX12/Resource/VirtualAddressMappingTable.h>
 #include <Backends/DX12/CommandList.h>
 #include <Backends/DX12/Detour.Gen.h>
 #include <Backends/DX12/Table.Gen.h>
@@ -45,6 +45,7 @@
 #include <Backends/DX12/Controllers/MetadataController.h>
 #include <Backends/DX12/Controllers/VersioningController.h>
 #include <Backends/DX12/Controllers/PDBController.h>
+#include <Backends/DX12/Controllers/ConfigController.h>
 #include <Backends/DX12/Export/ShaderExportHost.h>
 #include <Backends/DX12/Export/ShaderExportStreamAllocator.h>
 #include <Backends/DX12/Export/ShaderExportStreamer.h>
@@ -54,6 +55,7 @@
 #include <Backends/DX12/ShaderProgram/ShaderProgramHost.h>
 #include <Backends/DX12/Scheduler/Scheduler.h>
 #include <Backends/DX12/QueueSegmentAllocator.h>
+#include <Backends/DX12/Programs/Programs.h>
 #include <Backends/DX12/WRL.h>
 #include <Backends/DX12/Layer.h>
 
@@ -71,12 +73,13 @@
 #include <Message/IMessageStorage.h>
 
 // Common
-#ifndef NDEBUG
+#if USE_TRACKED_ALLOCATOR
 #include <Common/Allocator/TrackedAllocator.h>
-#endif // NDEBUG
+#endif // USE_TRACKED_ALLOCATOR
 #include <Common/IComponentTemplate.h>
 #include <Common/GlobalUID.h>
 #include <Common/IntervalActionThread.h>
+#include <Common/CrashHandler.h>
 #include <Common/FileSystem.h>
 
 // Detour
@@ -90,9 +93,9 @@
 #include <fstream>
 
 // Debugging allocator
-#ifndef NDEBUG
+#ifndef USE_TRACKED_ALLOCATOR
 TrackedAllocator trackedAllocator;
-#endif // NDEBUG
+#endif // USE_TRACKED_ALLOCATOR
 
 /// Known GUIDs
 static const GUID D3D12ExperimentalShadingModelGUID = GlobalUID::FromString("{76f5573e-f13a-40f5-b297-81ce9e18933f}").AsPlatformGUID();
@@ -134,11 +137,11 @@ static void CreateEventRemappingTable(DeviceState* state) {
 
     // Pool feature count
     uint32_t dataCount;
-    state->shaderDataHost->Enumerate(&dataCount, nullptr, ShaderDataType::Event);
+    state->shaderDataHost->EnumerateShader(&dataCount, nullptr, ShaderDataType::Event);
 
     // Pool features
     data.resize(dataCount);
-    state->shaderDataHost->Enumerate(&dataCount, data.data(), ShaderDataType::Event);
+    state->shaderDataHost->EnumerateShader(&dataCount, data.data(), ShaderDataType::Event);
 
     // Current offset
     uint32_t offset = 0;
@@ -204,12 +207,17 @@ HRESULT WINAPI D3D12CreateDeviceGPUOpen(
     const D3D12GPUOpenSDKRuntime& sdk,
     const D3D12_DEVICE_GPUOPEN_GPU_RESHAPE_INFO* info
 ) {
+    // Add crash handler for debugging
+#ifndef NDEBUG
+    SetDebugCrashHandler();
+#endif // NDEBUG
+    
     // Set allocators
-#if !defined(NDEBUG)
+#if USE_TRACKED_ALLOCATOR
     Allocators allocators = trackedAllocator.GetAllocators();
-#else // !defined(NDEBUG)
+#else // USE_TRACKED_ALLOCATOR
     Allocators allocators = {};
-#endif // !defined(NDEBUG)
+#endif // USE_TRACKED_ALLOCATOR
 
     // Create state
     auto *state = new (allocators, kAllocStateDevice) DeviceState(allocators.Tag(kAllocStateDevice));
@@ -248,6 +256,9 @@ HRESULT WINAPI D3D12CreateDeviceGPUOpen(
 
         // Get common components
         state->bridge = state->registry.Get<IBridge>();
+        
+        // Install logging
+        state->logBuffer = state->registry.AddNew<LogBuffer>();
 
         // Install the shader export host
         state->exportHost = state->registry.AddNew<ShaderExportHost>(state->allocators);
@@ -271,6 +282,12 @@ HRESULT WINAPI D3D12CreateDeviceGPUOpen(
 
         // Try to get the vendor
         state->vendor = GetVendor(dxgiAdapter);
+
+        // Register the state
+        state->registry.AddNew<DeviceProperties>(state);
+
+        // Register the state voter
+        state->registry.AddNew<DeviceStateVote>(state);
         
         // Set stride bounds
         state->cpuHeapTable.SetStrideBound(state->object);
@@ -353,9 +370,13 @@ HRESULT WINAPI D3D12CreateDeviceGPUOpen(
         state->versioningController = state->registry.AddNew<VersioningController>(state);
         ENSURE(state->versioningController->Install(), "Failed to install versioning controller");
 
-        // Install the versioning controller
+        // Install the pdb controller
         state->pdbController = state->registry.AddNew<PDBController>(state);
         ENSURE(state->pdbController->Install(), "Failed to install PDB controller");
+
+        // Install the config controller
+        state->configController = state->registry.AddNew<ConfigController>(state);
+        ENSURE(state->configController->Install(), "Failed to install config controller");
 
         // Install all user programs, done after feature creation for data pooling
         ENSURE(state->shaderProgramHost->InstallPrograms(), "Failed to install shader program host programs");
@@ -367,6 +388,12 @@ HRESULT WINAPI D3D12CreateDeviceGPUOpen(
         // Install the streamer
         state->exportStreamer = state->registry.AddNew<ShaderExportStreamer>(state);
         ENSURE(state->exportStreamer->Install(), "Failed to install shader export streamer");
+        
+        // Create vaddr mapping table
+        state->virtualAddressMappingTable = state->registry.AddNew<VirtualAddressMappingTable>(state, state->deviceAllocator);
+
+        // Create all internal programs
+        state->programs = CreatePrograms(allocators, state->object);
 
         // Install the queue segment allocator
         state->queueSegmentAllocator = state->registry.AddNew<QueueSegmentAllocator>(state);
@@ -382,6 +409,9 @@ HRESULT WINAPI D3D12CreateDeviceGPUOpen(
 
         // Start sync thread
         state->syncPointActionThread.Start(std::bind(DeviceSyncPoint, state));
+
+        // Inform the environment of post installs, handles headless modes
+        state->environment.PostInstall(state->uid);
     }
 
     // Cleanup
@@ -596,11 +626,11 @@ HRESULT WINAPI D3D12CreateDeviceGPUOpen(
 
 DX12_C_LINKAGE HRESULT WINAPI HookD3D12GetInterface(REFCLSID rclsid, REFIID riid, void** ppvDebug) {
     // Set allocators
-#if !defined(NDEBUG)
+#if USE_TRACKED_ALLOCATOR
     Allocators allocators = trackedAllocator.GetAllocators();
-#else // !defined(NDEBUG)
+#else // USE_TRACKED_ALLOCATOR
     Allocators allocators = {};
-#endif // !defined(NDEBUG)
+#endif // USE_TRACKED_ALLOCATOR
     
     // Pass down callchain
     void* handle{nullptr};
@@ -821,6 +851,9 @@ DeviceState::~DeviceState() {
     // Wait for all pending submissions
     scheduler->WaitForPending();
 
+    // Release all internal programs
+    destroy(programs, allocators);
+    
     // Manual uninstalls
     versioningController->Uninstall();
     metadataController->Uninstall();
@@ -864,7 +897,7 @@ void GlobalDeviceDetour::Uninstall() {
 
 void BridgeDeviceSyncPoint(DeviceState *device, CommandQueueState* queueState) {
     // Commit all logging to bridge
-    device->logBuffer.Commit(device->bridge.GetUnsafe());
+    device->logBuffer->Commit(device->bridge.GetUnsafe());
     
     // Commit controllers
     device->featureController->Commit();
@@ -877,6 +910,11 @@ void BridgeDeviceSyncPoint(DeviceState *device, CommandQueueState* queueState) {
         device->exportStreamer->Process(queueState);
     } else {
         device->exportStreamer->Process();
+    }
+    
+    // Invoke feature tables
+    for (const FeatureHookTable& table : device->featureHookTables) {
+        table.syncPoint.TryInvoke();
     }
 
     // Commit bridge
@@ -891,7 +929,7 @@ void BridgeDeviceSyncPoint(DeviceState *device, CommandQueueState* queueState) {
     }
 
     // Debugging helper
-#ifndef NDEBUG
+#if USE_TRACKED_ALLOCATOR
     if (false) {
         // Format
         std::stringstream stream;
@@ -900,5 +938,5 @@ void BridgeDeviceSyncPoint(DeviceState *device, CommandQueueState* queueState) {
         // Dump to console
         OutputDebugStringA(stream.str().c_str());
     }
-#endif // NDEBUG
+#endif // USE_TRACKED_ALLOCATOR
 }

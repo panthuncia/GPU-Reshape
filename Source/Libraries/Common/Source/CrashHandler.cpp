@@ -37,10 +37,28 @@
 #       include <iostream>
 #       include <Windows.h>
 #       include <dbghelp.h>
-#   endif
-#endif
+#   endif // NDEBUG
+#endif // _WIN32
 
 #ifdef WIN32_EXCEPTION_HANDLER
+static void InitializeStackFrameFromContext(STACKFRAME64& stack, CONTEXT& context) {
+    memset(&stack, 0, sizeof(STACKFRAME64));
+
+#if defined(_M_AMD64)
+    stack.AddrPC.Offset    = context.Rip;
+    stack.AddrFrame.Offset = context.Rbp;
+    stack.AddrStack.Offset = context.Rsp;
+#else
+    stack.AddrPC.Offset    = context.Eip;
+    stack.AddrFrame.Offset = context.Ebp;
+    stack.AddrStack.Offset = context.Esp;
+#endif
+
+    stack.AddrPC.Mode    = AddrModeFlat;
+    stack.AddrFrame.Mode = AddrModeFlat;
+    stack.AddrStack.Mode = AddrModeFlat;
+}
+
 static LONG WINAPI TopLevelExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo) {
     static std::mutex globalLock;
     std::lock_guard guard(globalLock);
@@ -61,18 +79,20 @@ static LONG WINAPI TopLevelExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo) 
     HANDLE process = GetCurrentProcess();
 
     // Ensure symbols are ready
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
     SymInitialize(process, NULL, TRUE);
 
-    // Module handles
-    HMODULE currentModule{nullptr};
     HMODULE lastModule{nullptr};
+
+    // Work on a local copy of the captured context.
+    CONTEXT context = *pExceptionInfo->ContextRecord;
 
     // Current displacement
     DWORD64 displacement{0};
 
     // Current frame
     STACKFRAME64 stack;
-    memset(&stack, 0, sizeof(STACKFRAME64));
+    InitializeStackFrameFromContext(stack, context);
 
     // Walk frame
     for (ULONG frame = 0;; frame++) {
@@ -87,7 +107,7 @@ static LONG WINAPI TopLevelExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo) 
             process,
             thread,
             &stack,
-            pExceptionInfo->ContextRecord,
+            &context,
             NULL,
             SymFunctionTableAccess64,
             SymGetModuleBase64,
@@ -99,50 +119,51 @@ static LONG WINAPI TopLevelExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo) 
             break;
         }
 
-        char buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)];
+        DWORD64 programCounter = stack.AddrPC.Offset;
+        if (!programCounter) {
+            break;
+        }
+
+        char buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME * sizeof(TCHAR)]{};
 
         // Symbol info
         PSYMBOL_INFO pSymbol = reinterpret_cast<PSYMBOL_INFO>(buffer);
         pSymbol->SizeOfStruct = sizeof(SYMBOL_INFO);
         pSymbol->MaxNameLen = MAX_SYM_NAME;
-        SymFromAddr(process, static_cast<ULONG64>(stack.AddrPC.Offset), &displacement, pSymbol);
+        BOOL hasSymbol = SymFromAddr(process, static_cast<ULONG64>(programCounter), &displacement, pSymbol);
 
         // Line info
-        IMAGEHLP_LINE64 *line = static_cast<IMAGEHLP_LINE64 *>(malloc(sizeof(IMAGEHLP_LINE64)));
-        line->SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+        IMAGEHLP_LINE64 line{};
+        line.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
 
         // Print symbol & address
-        std::cerr << "\t[" << reinterpret_cast<const void*>(pSymbol->Address) << "] " << pSymbol->Name;
+        std::cerr << "\t[" << reinterpret_cast<const void*>(programCounter) << "] ";
+        if (hasSymbol) {
+            std::cerr << pSymbol->Name;
+        } else {
+            std::cerr << "<unresolved symbol>";
+        }
 
-        // Next module?
-        if (!currentModule || lastModule != currentModule) {
+        HMODULE currentModule = reinterpret_cast<HMODULE>(SymGetModuleBase64(process, programCounter));
+        if (currentModule != lastModule) {
             lastModule = currentModule;
-            currentModule = nullptr;
 
-            // Module path
-            char module[256];
-            lstrcpyA(module, "");
-
-            // Try to get the module
-            GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCTSTR>(stack.AddrPC.Offset), &currentModule);
-
-            // Success?
+            char module[MAX_PATH]{};
             if (currentModule != nullptr) {
-                GetModuleFileNameA(currentModule, module, 256);
+                GetModuleFileNameA(currentModule, module, MAX_PATH);
             }
 
             std::cerr << "\n\t\t" << module;
         }
 
         // Get line, if possible
-        DWORD disp;
-        if (SymGetLineFromAddr64(process, stack.AddrPC.Offset, &disp, line)) {
-            std::cerr << "\n\t\t" << line->FileName << " line " << line->LineNumber;
+        DWORD disp{};
+        if (SymGetLineFromAddr64(process, programCounter, &disp, &line)) {
+            std::cerr << "\n\t\t" << line.FileName << " line " << line.LineNumber;
         }
 
         // Next!
         std::cerr << "\n";
-        free(line);
     }
 
     std::cerr << "\nWaiting for debugger to attach... " << std::flush;
@@ -162,10 +183,22 @@ static LONG WINAPI TopLevelExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo) 
 #endif
 
 void SetDebugCrashHandler() {
+    // Global lock
+    static std::mutex GLock;
+    std::lock_guard guard(GLock);
+
+    // Set up once
+    static bool GAcquired = false;
+    if (GAcquired) {
+        return;
+    }
+    
     // Platform handler
 #ifdef WIN32_EXCEPTION_HANDLER
     if (!IsDebuggerPresent()) {
         SetUnhandledExceptionFilter(TopLevelExceptionHandler);
     }
-#endif
+#endif // WIN32_EXCEPTION_HANDLER
+
+    GAcquired = true;
 }

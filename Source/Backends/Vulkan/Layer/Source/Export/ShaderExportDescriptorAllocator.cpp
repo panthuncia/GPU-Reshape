@@ -64,11 +64,11 @@ bool ShaderExportDescriptorAllocator::Install() {
 
     // Get the number of resources
     uint32_t dataResourceBound;
-    dataHost->Enumerate(&dataResourceBound, nullptr, ShaderDataType::DescriptorMask);
+    dataHost->EnumerateShader(&dataResourceBound, nullptr, ShaderDataType::DescriptorMask);
 
     // Get all resources
     dataResources.resize(dataResourceBound);
-    dataHost->Enumerate(&dataResourceBound, dataResources.data(), ShaderDataType::DescriptorMask);
+    dataHost->EnumerateShader(&dataResourceBound, dataResources.data(), ShaderDataType::DescriptorMask);
 
     // Descriptors for writing
     TrivialStackVector<VkDescriptorSetLayoutBinding, 16u> bindings(allocators);
@@ -179,7 +179,7 @@ void ShaderExportDescriptorAllocator::CreateBindingLayout() {
 
     // Descriptor data
     bindingInfo.descriptorDataDescriptorOffset = offset;
-    bindingInfo.descriptorDataDescriptorLength = std::min<uint32_t>(table->physicalDeviceProperties.limits.maxUniformBufferRange, 256'000);
+    bindingInfo.descriptorDataDescriptorLength = std::min<uint32_t>(table->physicalDeviceProperties.properties.limits.maxUniformBufferRange, 256'000);
     offset++;
 
     // Constants descriptor
@@ -298,7 +298,7 @@ ShaderExportSegmentDescriptorInfo ShaderExportDescriptorAllocator::Allocate() {
     table->next_vkUpdateDescriptorSets(table->object, 2u, writes, 0, nullptr);
 
 #if LOG_ALLOCATION
-    table->parent->logBuffer.Add("Vulkan", LogSeverity::Info, "Allocated segment descriptors");
+    table->parent->logBuffer->Add("Vulkan", LogSeverity::Info, "Allocated segment descriptors");
 #endif
 
     // OK

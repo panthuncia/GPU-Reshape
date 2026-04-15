@@ -33,8 +33,12 @@
 #include <Backends/Vulkan/Resource/DescriptorDataSegment.h>
 #include <Backends/Vulkan/Controllers/Versioning.h>
 #include <Backends/Vulkan/ShaderData/ConstantShaderDataBuffer.h>
+#include <Backends/Vulkan/Export/ShaderExportConstantAllocator.h>
+#include <Backends/Vulkan/Export/ShaderExportDeviceAllocator.h>
+#include <Backends/Vulkan/Export/ShaderExportFreeDescriptorAllocator.h>
 
 // Backend
+#include <Backend/IL/Execution/ExecutionInfo.h>
 #include <Backend/CommandContextHandle.h>
 #include <Backend/CommandContext.h>
 
@@ -90,8 +94,8 @@ struct ShaderExportPipelineBindState {
     /// Currently bound vk object
     VkPipeline pipelineObject{VK_NULL_HANDLE};
 
-    /// Is the current pipeline instrumented?
-    bool isInstrumented{false};
+    /// Current pipeline instrument, null if not instrumented
+    PipelineInstrument* pipelineInstrument{nullptr};
 
     /// The descriptor info, may not be mapped
     ShaderExportSegmentDescriptorAllocation currentSegment{};
@@ -110,7 +114,36 @@ struct ShaderExportRenderPassState {
 
     /// Are we inside a render pass? Also serves as validation for the deep copy
     bool insideRenderPass{false};
+
+    /// Assigned uid
+    uint32_t rollingUID{0};
 };
+
+struct ShaderExportStreamMarkerEntryState {
+    /// CRC32 hash
+    uint32_t hash32{0};
+};
+
+struct ShaderExportStreamMarkerState {
+    /// All markers
+    TrivialStackVector<ShaderExportStreamMarkerEntryState, kMaxExecutionInfoMarkerCount> stack;
+};
+
+#ifndef NDEBUG
+struct ShaderExportStreamStateDebugStream {
+    /// Identifying name
+    std::string name;
+
+    /// Mapped data for later reading
+    const void* mappedData{nullptr};
+
+    /// Offset to read from
+    uint64_t offset{0};
+
+    /// Number of bytes to read from the offset
+    uint64_t length{0};
+};
+#endif // NDEBUG
 
 /// Single stream state
 struct ShaderExportStreamState {
@@ -123,6 +156,9 @@ struct ShaderExportStreamState {
     /// Graphics render pass
     ShaderExportRenderPassState renderPass;
 
+    /// Currently set markers
+    ShaderExportStreamMarkerState markers;
+
     /// All segment descriptors, lifetime bound to deferred segment
     std::vector<ShaderExportSegmentDescriptorAllocation> segmentDescriptors;
 
@@ -132,8 +168,24 @@ struct ShaderExportStreamState {
     /// Shared constants buffer
     ConstantShaderDataBuffer constantShaderDataBuffer;
 
+    /// Shared constants allocator
+    /// Useful for small transient allocations
+    ShaderExportConstantAllocator constantAllocator;
+
+    /// Shared allocators
+    ShaderExportFreeDescriptorAllocatorSegment freeDescriptorAllocator;
+
+    /// Shared device allocator
+    /// Useful for larger, stateful allocations
+    ShaderExportDeviceAllocator deviceAllocator;
+
     /// Top context handle
     CommandContextHandle commandContextHandle{kInvalidCommandContextHandle};
+
+#ifndef NDEBUG
+    /// All pending debug streams
+    std::vector<ShaderExportStreamStateDebugStream> debugStreams;
+#endif // NDEBUG
 };
 
 struct ShaderExportStreamSegmentUserContext {

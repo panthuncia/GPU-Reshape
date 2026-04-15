@@ -35,6 +35,7 @@
 #include <Backends/Vulkan/CommandBuffer.h>
 #include <Backends/Vulkan/Symbolizer/ShaderSGUIDHost.h>
 #include <Backends/Vulkan/Compiler/Diagnostic/DiagnosticPrettyPrint.h>
+#include <Backends/Vulkan/States/RaytracingPipelineState.h>
 
 // Backend
 #include <Backend/IFeature.h>
@@ -352,7 +353,7 @@ void InstrumentationController::OnMessage(const ConstMessageStreamView<>::ConstI
 
             // Validate
             if (!virtualFeatureRedirects[message->index]) {
-                table->parent->logBuffer.Add("Vulkan", LogSeverity::Error, Format("Virtual redirect failed for feature \"{}\"", message->name.View()));
+                table->parent->logBuffer->Add("Vulkan", LogSeverity::Error, Format("Virtual redirect failed for feature \"{}\"", message->name.View()));
             }
             break;
         }
@@ -573,6 +574,9 @@ void InstrumentationController::OnMessage(const ConstMessageStreamView<>::ConstI
                 case 2:
                     it->type = PipelineType::Compute;
                     break;
+                case 3:
+                    it->type = PipelineType::Raytracing;
+                    break;
             }
 
             // Copy info
@@ -669,6 +673,9 @@ void InstrumentationController::OnStateRequest(const struct GetStateMessage &mes
                     case PipelineType::Compute:
                         response->type = 2;
                         break;
+                    case PipelineType::Raytracing:
+                        response->type = 3;
+                        break;
                 }
             }
             break;
@@ -689,7 +696,7 @@ void InstrumentationController::SetInstrumentationInfo(InstrumentationInfo &info
             if (physical) {
                 info.featureBitSet |= physical;
             } else {
-                table->parent->logBuffer.Add("Vulkan", LogSeverity::Error, Format("Unknown virtual redirect at {}", index));
+                table->parent->logBuffer->Add("Vulkan", LogSeverity::Error, Format("Unknown virtual redirect at {}", index));
             }
 
             // Next!
@@ -759,7 +766,7 @@ void InstrumentationController::CommitInstrumentation() {
 
     // Diagnostic
 #if LOG_INSTRUMENTATION
-    table->parent->logBuffer.Add("Vulkan", LogSeverity::Info, Format(
+    table->parent->logBuffer->Add("Vulkan", LogSeverity::Info, Format(
         "Committing {} unique shaders and {} pipelines for instrumentation",
         immediateBatch.dirtyShaderModules.size(),
         immediateBatch.dirtyPipelines.size()
@@ -897,11 +904,6 @@ void InstrumentationController::CommitShaders(DispatcherBucket* bucket, void *da
                 continue;
             }
 
-            // Raytracing is pass-through for now
-            if (dependentObject->type == PipelineType::Raytracing) {
-                continue;
-            }
-
             // Number of slots used by the pipeline
             uint32_t pipelineLayoutUserSlots = dependentObject->layout->boundUserDescriptorStates;
 
@@ -914,7 +916,7 @@ void InstrumentationController::CommitShaders(DispatcherBucket* bucket, void *da
             // Create the instrumentation key
             ShaderModuleInstrumentationKey instrumentationKey{};
             instrumentationKey.featureBitSet = featureBitSet;
-            instrumentationKey.pipelineLayoutUserSlots = pipelineLayoutUserSlots;
+            instrumentationKey.global.descriptorSet = pipelineLayoutUserSlots;
             instrumentationKey.pipelineLayoutDataPCOffset = pipelineLayoutDataPCOffset;
 #if PRMT_METHOD == PRMT_METHOD_UB_PC
             instrumentationKey.pipelineLayoutPRMTPCOffset = pipelineLayoutPRMTPCOffset;
@@ -924,7 +926,7 @@ void InstrumentationController::CommitShaders(DispatcherBucket* bucket, void *da
             // Combine hashes
             instrumentationKey.combinedHash = dependentObject->instrumentationInfo.specializationHash;
             CombineHash(instrumentationKey.combinedHash, state->instrumentationInfo.specializationHash);
-            CombineHash(instrumentationKey.combinedHash, instrumentationKey.pipelineLayoutUserSlots);
+            CombineHash(instrumentationKey.combinedHash, pipelineLayoutUserSlots);
             CombineHash(instrumentationKey.combinedHash, instrumentationKey.pipelineLayoutDataPCOffset);
 #if PRMT_METHOD == PRMT_METHOD_UB_PC
             CombineHash(instrumentationKey.combinedHash, instrumentationKey.pipelineLayoutPRMTPCOffset);
@@ -1039,16 +1041,16 @@ bool InstrumentationController::CommitPipeline(Batch* batch, PipelineState* stat
         }
     }
 
-    // Raytracing is pass-through for now
-    if (state->type == PipelineType::Raytracing) {
-        superFeatureBitSet = 0x0;
-    }
-
     // No features?
     if (!superFeatureBitSet) {
         // Inform the dependent object to fetch the default pipeline
         if (state->isLibrary) {
             dependentObject->libraryInstrumentationKeys[dependentObject->GetDependentIndex(state)] = kDefaultPipelineStateHash;
+        }
+
+        // If raytracing, reset the patch table
+        if (auto* raytracingState = static_cast<RaytracingPipelineState*>(state); state->type == PipelineType::Raytracing) {
+            raytracingState->hotSwapPatchTable.store(nullptr);
         }
         
         // Set the hot swapped object to native
@@ -1155,11 +1157,11 @@ void InstrumentationController::CommitOpaquePipelines(DispatcherBucket* bucket, 
 
         // Compose keys
         for (auto&& kv : rejectedKeys) {
-            keyMessage << "\tObject " << kv.first << " [" << kv.second.featureBitSet << "] with " << kv.second.pipelineLayoutUserSlots << " user slots\n";
+            keyMessage << "\tObject " << kv.first << " [" << kv.second.featureBitSet << "] with " << kv.second.global.descriptorSet << " user slots\n";
         }
 
         // Submit
-        table->parent->logBuffer.Add("Vulkan", LogSeverity::Error, keyMessage.str());
+        table->parent->logBuffer->Add("Vulkan", LogSeverity::Error, keyMessage.str());
 #endif // LOG_REJECTED_KEYS
     }
 }
@@ -1182,6 +1184,11 @@ void InstrumentationController::CommitTable(DispatcherBucket* bucket, void *data
     // Commit all pending entries
     for (Batch::CommitEntry entry : batch->commitEntries) {
         if (auto pipeline = entry.state->GetInstrument(entry.combinedHash)) {
+            // If raytracing, set the patch table
+            if (auto* raytracingState = static_cast<RaytracingPipelineState*>(entry.state); entry.state->type == PipelineType::Raytracing) {
+                raytracingState->hotSwapPatchTable.store(raytracingState->GetPatch(entry.combinedHash));
+            }
+            
             entry.state->hotSwapObject.store(pipeline);
         }
     }

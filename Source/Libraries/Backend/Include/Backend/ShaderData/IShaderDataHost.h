@@ -27,12 +27,13 @@
 #pragma once
 
 // Backend
-#include "ShaderData.h"
-#include "ShaderDataBufferInfo.h"
-#include "ShaderDataEventInfo.h"
-#include "ShaderDataDescriptorInfo.h"
-#include "ShaderDataInfo.h"
-#include "ShaderDataCapabilityTable.h"
+#include <Backend/ShaderData/ShaderData.h>
+#include <Backend/ShaderData/ShaderDataBufferInfo.h>
+#include <Backend/ShaderData/ShaderDataEventInfo.h>
+#include <Backend/ShaderData/ShaderDataDescriptorInfo.h>
+#include <Backend/ShaderData/ShaderDataInfo.h>
+#include <Backend/ShaderData/ShaderDataCapabilityTable.h>
+#include <Backend/ShaderProgram/ShaderProgram.h>
 
 // Common
 #include <Common/IComponent.h>
@@ -43,8 +44,16 @@ public:
 
     /// Create a new buffer
     /// \param info buffer information
+    /// \param name name of this buffer
     /// \return invalid if failed
-    virtual ShaderDataID CreateBuffer(const ShaderDataBufferInfo& info) = 0;
+    virtual ShaderDataID CreateBuffer(const ShaderDataBufferInfo& info, const char* name) = 0;
+
+    /// Create a buffer binding
+    /// Must be bound through the command builder
+    /// @param program target program
+    /// @param info buffer info
+    /// @return invalid if failed
+    virtual ShaderDataID CreateBufferBinding(const ShaderProgramID& program, const ShaderDataBufferBindingInfo& info) = 0;
 
     /// Create a new event data
     /// \param info buffer information
@@ -67,6 +76,12 @@ public:
     /// \return mapped buffer
     virtual void* Map(ShaderDataID rid) = 0;
 
+    /// Unmap a buffer
+    /// \param rid resource id
+    /// \param mapped the mapped address
+    /// \return mapped buffer
+    virtual void Unmap(ShaderDataID rid, void* mapped) = 0;
+
     /// Flush a mapped range
     /// \param rid resource id
     /// \param offset byte offset
@@ -84,7 +99,15 @@ public:
     /// Enumerate all created data
     /// \param count if [out] is null, filled with the number of resources
     /// \param out if not null, filled with all resources up to [count]
-    virtual void Enumerate(uint32_t* count, ShaderDataInfo* out, ShaderDataTypeSet mask) = 0;
+    /// \param mask the descriptor mask
+    virtual void EnumerateShader(uint32_t* count, ShaderDataInfo* out, ShaderDataTypeSet mask) = 0;
+
+    /// Enumerate all bindings for a program
+    /// \param programID target program
+    /// \param count if [out] is null, filled with the number of resources
+    /// \param out if not null, filled with all resources up to [count]
+    /// \param mask the descriptor mask
+    virtual void EnumerateProgram(ShaderProgramID programID, uint32_t* count, ShaderDataInfo* out, ShaderDataTypeSet mask) = 0;
 
     /// Get the target capabilities
     /// \return capability table

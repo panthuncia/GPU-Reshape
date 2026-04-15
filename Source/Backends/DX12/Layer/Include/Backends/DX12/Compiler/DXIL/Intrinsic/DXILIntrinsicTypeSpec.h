@@ -34,6 +34,7 @@ enum class DXILIntrinsicTypeSpec {
     F32,
     F16,
     I64,
+    I16,
     I32,
     I8,
     I1,

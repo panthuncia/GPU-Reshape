@@ -70,7 +70,7 @@ namespace std {
         return s;
     }
 
-    static inline bool iequals(const string &a, const string &b) {
+    static inline bool iequals(const string_view &a, const string_view &b) {
         return std::equal(
             a.begin(), a.end(),
             b.begin(), b.end(),
@@ -150,5 +150,15 @@ namespace std {
 
     static inline bool iscxxalnum(char c) {
         return isalnum(c) || c == '_';
+    }
+    
+    static bool wcac_equals(const wchar_t* a, const char* b) {
+        while (*a && *b) {
+            if (*(a++) != static_cast<wchar_t>(*(b++))) {
+                return false;
+            }
+        }
+
+        return *a == '\0' && *b == '\0';
     }
 }

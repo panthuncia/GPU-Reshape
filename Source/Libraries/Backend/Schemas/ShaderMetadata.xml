@@ -41,6 +41,7 @@
     <message name="GetShaderCode">
         <field name="shaderUID" type="uint64"/>
         <field name="poolCode" type="bool"/>
+        <field name="deferred" type="bool"/>
     </message>
 
     <message name="GetShaderIL">
@@ -48,6 +49,14 @@
     </message>
 
     <message name="GetShaderBlockGraph">
+        <field name="shaderUID" type="uint64"/>
+    </message>
+
+    <message name="SetUseShaderExternalReference">
+        <field name="enabled" type="bool"/>
+    </message>
+
+    <message name="ReleaseShader">
         <field name="shaderUID" type="uint64"/>
     </message>
 
@@ -61,6 +70,7 @@
     <message name="ShaderCode">
         <field name="shaderUID" type="uint64"/>
         <field name="language"  type="string"/>
+        <field name="optimized" type="bool"/>
         <field name="found"     type="bool"/>
         <field name="native"    type="bool"/>
         <field name="fileCount" type="uint32"/>
@@ -85,5 +95,19 @@
         <field name="shaderUID" type="uint64"/>
         <field name="found"     type="bool"/>
         <field name="nodes"     type="string"/>
+    </message>
+
+    <message name="GetShaderStatus">
+        <field name="shaderUIDs" type="array" element="uint64"/>
+    </message>
+
+    <message name="ShaderStatus">
+        <field name="shaderUID" type="uint64"/>
+        <field name="active" type="bool"/>
+        <field name="instrumented" type="bool"/>
+    </message>
+
+    <message name="ShaderStatusCollection">
+        <field name="status" type="stream"/>
     </message>
 </schema>

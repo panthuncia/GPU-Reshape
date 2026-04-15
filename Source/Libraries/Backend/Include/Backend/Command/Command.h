@@ -104,6 +104,16 @@ struct SetDescriptorDataCommand : public TCommand<SetDescriptorDataCommand, Comm
     ShaderDataID id;
 };
 
+struct SetResourceCommand : public TCommand<SetResourceCommand, CommandType::SetResource> {
+    ShaderDataID id;
+    uint32_t puid;
+};
+
+struct SetResourceDataCommand : public TCommand<SetResourceDataCommand, CommandType::SetResourceData> {
+    ShaderDataID id;
+    ShaderDataID buffer;
+};
+
 enum class StageBufferFlag {
     None = 0,
     Atomic32 = BIT(1)
@@ -124,6 +134,14 @@ struct ClearBufferCommand : public TCommand<ClearBufferCommand, CommandType::Cle
     uint32_t value;
 };
 
+struct CopyBufferCommand : public TCommand<CopyBufferCommand, CommandType::CopyBuffer> {
+    ShaderDataID source;
+    size_t sourceOffset;
+    ShaderDataID dest;
+    size_t destOffset;
+    uint64_t byteCount;
+};
+
 struct DiscardCommand : public TCommand<DiscardCommand, CommandType::Discard> {
     uint32_t puid;
 };
@@ -132,6 +150,20 @@ struct DispatchCommand : public TCommand<DispatchCommand, CommandType::Dispatch>
     uint32_t groupCountX;
     uint32_t groupCountY;
     uint32_t groupCountZ;
+};
+
+struct DispatchIndirectCommand : public TCommand<DispatchIndirectCommand, CommandType::DispatchIndirect> {
+    ShaderDataID buffer;
+    uint32_t offset;
+};
+
+struct BeginPredicateCommand : public TCommand<BeginPredicateCommand, CommandType::BeginPredicate> {
+    ShaderDataID buffer;
+    uint32_t offset;
+};
+
+struct EndPredicateCommand : public TCommand<EndPredicateCommand, CommandType::EndPredicate> {
+    ShaderDataID buffer;
 };
 
 struct UAVBarrierCommand : public TCommand<UAVBarrierCommand, CommandType::UAVBarrier> {

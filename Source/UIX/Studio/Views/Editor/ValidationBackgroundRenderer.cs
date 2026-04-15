@@ -49,7 +49,7 @@ namespace Studio.Views.Editor
         /// <summary>
         /// Current content view model
         /// </summary>
-        public ITextualShaderContentViewModel? ShaderContentViewModel { get; set; }
+        public ITextualContent? ShaderContentViewModel { get; set; }
 
         /// <summary>
         /// Invoked on document draws
@@ -71,7 +71,7 @@ namespace Studio.Views.Editor
             foreach (ValidationObject validationObject in _validationObjects)
             {
                 // Valid file?
-                if (!ShaderContentViewModel.IsObjectVisible(validationObject))
+                if (validationObject.Segment == null || !ShaderContentViewModel.IsLocationVisible(validationObject.Segment.Location))
                 {
                     continue;
                 }
@@ -100,11 +100,11 @@ namespace Studio.Views.Editor
         {
             switch (obj.Severity)
             {
-                case ValidationSeverity.Info:
+                case SourceObjectSeverity.Info:
                     return _validationBrushInfo;
-                case ValidationSeverity.Warning:
+                case SourceObjectSeverity.Warning:
                     return _validationBrushWarning;
-                case ValidationSeverity.Error:
+                case SourceObjectSeverity.Error:
                     return _validationBrushError;
                 default:
                     throw new ArgumentOutOfRangeException();

@@ -45,6 +45,11 @@ namespace Studio.ViewModels.Tools
         /// Tooling icon
         /// </summary>
         public override StreamGeometry? Icon => ResourceLocator.GetIcon("ToolLog");
+
+        /// <summary>
+        /// Tooling tip
+        /// </summary>
+        public override string? ToolTip => Resources.Resources.Tool_Log;
         
         /// <summary>
         /// Refresh all items
@@ -212,7 +217,7 @@ namespace Studio.ViewModels.Tools
             // Open from derived
             if (ServiceRegistry.Get<IWindowService>() is { } service)
             {
-                service.OpenFor(instance.ViewModel);
+                service.OpenDialogFor(instance.ViewModel);
             }
         }
 

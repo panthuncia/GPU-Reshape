@@ -45,7 +45,8 @@ namespace Studio.Services
             {
                 new LogStatusViewModel(),
                 new NetworkStatusViewModel(),
-                new InstrumentationStatusViewModel()
+                new InstrumentationStatusViewModel(),
+                new IndexingStatusViewModel()
             });
         }
     }

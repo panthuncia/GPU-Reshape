@@ -55,6 +55,15 @@ namespace Studio.ViewModels.Menu
         }
 
         /// <summary>
+        /// Is visible?
+        /// </summary>
+        public bool IsVisible
+        {
+            get => _isVisible;
+            set => this.RaiseAndSetIfChanged(ref _isVisible, value);
+        }
+
+        /// <summary>
         /// Items within
         /// </summary>
         public ObservableCollection<IMenuItemViewModel> Items { get; } = new();
@@ -108,7 +117,7 @@ namespace Studio.ViewModels.Menu
         /// </summary>
         private void OnLaunchApplication()
         {
-            ServiceRegistry.Get<IWindowService>()?.OpenFor(new LaunchViewModel());
+            ServiceRegistry.Get<IWindowService>()?.OpenDialogFor(new LaunchViewModel());
         }
 
         /// <summary>
@@ -116,7 +125,7 @@ namespace Studio.ViewModels.Menu
         /// </summary>
         private void OnCreateConnection()
         {
-            ServiceRegistry.Get<IWindowService>()?.OpenFor(new ConnectViewModel());
+            ServiceRegistry.Get<IWindowService>()?.OpenDialogFor(new ConnectViewModel());
         }
 
         /// <summary>
@@ -136,5 +145,10 @@ namespace Studio.ViewModels.Menu
         /// Internal enabled state
         /// </summary>
         private bool _isEnabled = true;
+
+        /// <summary>
+        /// Internal visible state
+        /// </summary>
+        private bool _isVisible = true;
     }
 }

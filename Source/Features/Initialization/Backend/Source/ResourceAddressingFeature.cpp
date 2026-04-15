@@ -46,6 +46,9 @@
 #include <Backend/ShaderProgram/IShaderProgramHost.h>
 #include <Backend/Scheduler/IScheduler.h>
 #include <Backend/SubmissionContext.h>
+#include <Backend/IL/Instrumentation/ValidationCoverage.h>
+#include <Backend/IL/Instrumentation/Traceback.h>
+#include <Backend/ShaderData/ShaderDataValidationCoverage.h>
 
 // Generated schema
 #include <Schemas/Features/Initialization.h>
@@ -80,7 +83,7 @@ bool ResourceAddressingInitializationFeature::Install() {
     initializationMaskBufferID = shaderDataHost->CreateBuffer(ShaderDataBufferInfo {
         .elementCount = 1u << Backend::IL::kResourceTokenPUIDBitCount,
         .format = Backend::IL::Format::R32UInt
-    });
+    }, "InitializationAddressing.MaskBuffer");
 
     // Must have program host
     auto programHost = registry->Get<IShaderProgramHost>();
@@ -96,6 +99,9 @@ bool ResourceAddressingInitializationFeature::Install() {
 
     // Register masker
     srbMaskingShaderProgramID = programHost->Register(srbMaskingShaderProgram);
+
+    // Coverage host buffers
+    dataValidationCoverage = registry->Get<ShaderDataValidationCoverage>();
 
     // OK
     return true;
@@ -152,6 +158,9 @@ void ResourceAddressingInitializationFeature::Inject(IL::Program &program, const
     // Options
     const SetInstrumentationConfigMessage config = CollapseOrDefault<SetInstrumentationConfigMessage>(specialization);
     
+    // Get the coverage id, if enabled
+    IL::ID coverageBufferID = IL::GetValidationCoverageBufferID(program, config, dataValidationCoverage);
+
     // Get the data ids
     IL::ID initializationMaskBufferDataID = program.GetShaderDataMap().Get(initializationMaskBufferID)->id;
 
@@ -248,6 +257,9 @@ void ResourceAddressingInitializationFeature::Inject(IL::Program &program, const
         // Allocate failure block
         IL::Emitter<> mismatch(program, *context.function.GetBasicBlocks().AllocBlock());
         mismatch.AddBlockFlag(BasicBlockFlag::NoInstrumentation);
+        
+        // If coverage, store it
+        IL::StoreValidationCoverage(mismatch, coverageBufferID, sguid);
 
         // Perform instrumentation check
         IL::Emitter<> pre(program, context.basicBlock);
@@ -267,6 +279,9 @@ void ResourceAddressingInitializationFeature::Inject(IL::Program &program, const
 
         // Compare mask against token SRB
         IL::ID cond = pre.NotEqual(pre.BitAnd(currentMask, SRB), SRB);
+
+        // If coverage, limit it
+        cond = IL::ApplyValidationCoverage(pre, coverageBufferID, sguid, cond);
 
         // If so, branch to failure, otherwise resume
         pre.BranchConditional(cond, mismatch.GetBasicBlock(), resumeBlock, IL::ControlFlow::Selection(resumeBlock));
@@ -292,6 +307,11 @@ void ResourceAddressingInitializationFeature::Inject(IL::Program &program, const
             msg.detail.coordinate[2] = zero;
             msg.detail.mip = zero;
             msg.detail.byteOffset = zero;
+        }
+            
+        // Write traceback data
+        if (config.traceback) {
+            IL::AppendTracebackChunk<UninitializedResourceMessage>(msg, mismatch);
         }
         
         // Export the message

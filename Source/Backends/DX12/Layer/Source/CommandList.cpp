@@ -42,10 +42,21 @@
 #include <Backends/DX12/QueueSegmentAllocator.h>
 #include <Backends/DX12/IncrementalFence.h>
 #include <Backends/DX12/Scheduler/Scheduler.h>
+#include <Backends/DX12/Export/ShaderExportStreamStateBarrierTracking.h>
+#include <Backends/DX12/Export/ShaderExportStreamStateRaytracingCache.h>
+#include <Backends/DX12/Allocation/DeviceAllocator.h>
+
+// Shared
+#include <Shared/ShaderBackendMessage.h>
 
 // Backend
+#include <Backend/IL/DeviceCommand.h>
 #include <Backend/SubmissionContext.h>
+#include <Backend/IL/Execution/ExecutionInfo.h>
 #include <Backend/IFeature.h>
+
+// WinPixEventRuntime
+#include <WinPixEventRuntime/pix3.h>
 
 static D3D12_COMMAND_LIST_TYPE GetEmulatedCommandListType(D3D12_COMMAND_LIST_TYPE type) {
     switch (type) {
@@ -119,6 +130,11 @@ void CreateDeviceCommandProxies(DeviceState *state) {
             state->commandListProxies.featureHooks_EndRenderPass[i] = hookTable.endRenderPass;
             state->commandListProxies.featureBitSetMask_EndRenderPass |= (1ull << i);
         }
+
+        if (hookTable.deviceCommand.IsValid()) {
+            state->commandListProxies.featureHooks_ExecuteIndirect[i] = hookTable.deviceCommand;
+            state->commandListProxies.featureBitSetMask_ExecuteIndirect |= (1ull << i);
+        }
     }
 }
 
@@ -138,6 +154,7 @@ void SetDeviceCommandFeatureSetAndCommit(DeviceState *state, uint64_t featureSet
     state->commandListProxies.featureBitSet_BeginRenderPass = state->commandListProxies.featureBitSetMask_BeginRenderPass & featureSet;
     state->commandListProxies.featureBitSet_EndRenderPass = state->commandListProxies.featureBitSetMask_EndRenderPass & featureSet;
     state->commandListProxies.featureBitSet_OMSetRenderTargets = state->commandListProxies.featureBitSetMask_OMSetRenderTargets & featureSet;
+    state->commandListProxies.featureBitSet_ExecuteIndirect = state->commandListProxies.featureBitSetMask_ExecuteIndirect & featureSet;
 }
 
 static HRESULT CreateCommandQueueState(ID3D12Device *device, ID3D12CommandQueue* commandQueue, const D3D12_COMMAND_QUEUE_DESC *desc, const IID &riid, void **pCommandQueue) {
@@ -227,6 +244,70 @@ HRESULT WINAPI HookID3D12DeviceCreateCommandQueue1(ID3D12Device *device, const D
     return CreateCommandQueueState(device, commandQueue, desc, riid, pCommandQueue);
 }
 
+static void CreateCommandSignatureCommandData(ID3D12Device *device, const D3D12_COMMAND_SIGNATURE_DESC* pDesc, CommandSignatureState* state) {
+    std::vector<uint32_t> dwords;
+
+    // Append header
+    dwords.push_back(pDesc->NumArgumentDescs);
+    dwords.push_back(pDesc->ByteStride);
+
+    // Append command types
+    for (uint32_t i = 0; i < pDesc->NumArgumentDescs; i++) {
+        switch (pDesc->pArgumentDescs[i].Type) {
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH:
+                dwords.push_back(static_cast<uint32_t>(IL::DeviceCommandType::Dispatch));
+                break;
+            case D3D12_INDIRECT_ARGUMENT_TYPE_VERTEX_BUFFER_VIEW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT_BUFFER_VIEW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_SHADER_RESOURCE_VIEW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_UNORDERED_ACCESS_VIEW:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH:
+            case D3D12_INDIRECT_ARGUMENT_TYPE_INCREMENTING_CONSTANT:
+                dwords.push_back(static_cast<uint32_t>(IL::DeviceCommandType::Unexposed));
+                break;
+        }
+    }
+
+    // Resource info
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    desc.Alignment = 0;
+    desc.Width = sizeof(uint32_t) * dwords.size();
+    desc.Height = 1;
+    desc.DepthOrArraySize = 1;
+    desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    desc.Format = DXGI_FORMAT_UNKNOWN;
+    desc.MipLevels = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.SampleDesc.Count = 1;
+
+    // Standard upload
+    D3D12_HEAP_PROPERTIES heapProperties{};
+    heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
+
+    // Create the resource
+    device->CreateCommittedResource(
+        &heapProperties, D3D12_HEAP_FLAG_NONE,
+        &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
+        __uuidof(ID3D12Resource), reinterpret_cast<void**>(&state->deviceCommandAllocation)
+    );
+
+    // Map the range
+    void* data{nullptr};
+    state->deviceCommandAllocation->Map(0, nullptr, &data);
+
+    // Copy over the data
+    std::memcpy(data, dwords.data(), desc.Width);
+
+    // Unmap
+    state->deviceCommandAllocation->Unmap(0, nullptr);
+}
+
 HRESULT WINAPI HookID3D12DeviceCreateCommandSignature(ID3D12Device *device, const D3D12_COMMAND_SIGNATURE_DESC* pDesc, ID3D12RootSignature* pRootSignature, const IID& riid, void** ppvCommandSignature) {
     auto table = GetTable(device);
 
@@ -244,9 +325,13 @@ HRESULT WINAPI HookID3D12DeviceCreateCommandSignature(ID3D12Device *device, cons
     state->allocators = table.state->allocators;
     state->parent = device;
     state->object = commandSignature;
+    state->byteStride = pDesc->ByteStride;
+    state->arguments.reserve(pDesc->NumArgumentDescs);
 
     // Filter arguments
     for (uint32_t i = 0; i < pDesc->NumArgumentDescs; i++) {
+        state->arguments.push_back(pDesc->pArgumentDescs[i]);
+        
         switch (pDesc->pArgumentDescs[i].Type) {
             default:
                 break;
@@ -263,10 +348,13 @@ HRESULT WINAPI HookID3D12DeviceCreateCommandSignature(ID3D12Device *device, cons
                 state->activeTypes = PipelineType::Graphics;
                 break;
             case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS:
-                // No active types as there's no instrumentation yet
+                state->activeTypes = PipelineType::StateObject;
                 break;
         }
     }
+
+    // Create the signature data for instrumentation
+    CreateCommandSignatureCommandData(device, pDesc, state);
 
     // Create detours
     commandSignature = CreateDetour(state->allocators, commandSignature, state);
@@ -412,21 +500,22 @@ HRESULT HookID3D12CommandAllocatorReset(ID3D12CommandAllocator *_this) {
     return table.next->Reset();
 }
 
-static ID3D12PipelineState *GetHotSwapPipeline(ID3D12PipelineState *initialState) {
+static PipelineInstrument *GetHotSwapPipeline(ID3D12PipelineState *initialState) {
     if (!initialState) {
+        return nullptr;
+    }
+    
+    // PipelineState0 only supports graphics/compute
+    PipelineState* state = GetState(initialState);
+    if (state->type != PipelineType::Graphics && state->type != PipelineType::Compute) {
         return nullptr;
     }
 
     // Available hot swap?
-    if (ID3D12PipelineState *hotSwap = GetState(initialState)->hotSwapObject.load()) {
-        return hotSwap;
-    }
-
-    return nullptr;
+    return state->hotSwapObject.load();
 }
 
-
-static void BeginCommandList(DeviceState* device, CommandListState* state, ID3D12CommandAllocator* allocator, ID3D12PipelineState* initialState, ID3D12PipelineState* hotSwap, bool isHotSwap) {
+static void BeginCommandList(DeviceState* device, CommandListState* state, ID3D12CommandAllocator* allocator, PipelineState* initialState, ID3D12PipelineState* pipelineObject, PipelineInstrument* instrument) {
     auto allocatorTable = GetTable(allocator);
 
     // Either the state must be zero, or an allocator already owns it
@@ -466,7 +555,7 @@ static void BeginCommandList(DeviceState* device, CommandListState* state, ID3D1
 
     // Inform the streamer of a new pipeline
     if (initialState) {
-        device->exportStreamer->BindPipeline(state->streamState, GetState(initialState), hotSwap, isHotSwap, state->object);
+        device->exportStreamer->BindPipeline(state->streamState, initialState, pipelineObject, instrument, state->object);
     }
 
     // Copy proxy table
@@ -488,7 +577,7 @@ static void BeginCommandList(DeviceState* device, CommandListState* state, ID3D1
     }
 }
 
-HRESULT CreateCommandListState(ID3D12Device *device, ID3D12CommandList* commandList, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *allocator, ID3D12PipelineState *initialState, ID3D12PipelineState* hotSwap, bool opened, const IID &riid, void **pCommandList) {
+HRESULT CreateCommandListState(ID3D12Device *device, ID3D12CommandList* commandList, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *allocator, PipelineState *initialState, ID3D12PipelineState* pipelineObject, PipelineInstrument* instrument, bool opened, const IID &riid, void **pCommandList) {
     auto table = GetTable(device);
 
     // Create state
@@ -510,7 +599,7 @@ HRESULT CreateCommandListState(ID3D12Device *device, ID3D12CommandList* commandL
 
         // Handle sub-systems
         if (opened) {
-            BeginCommandList(table.state, state, allocator, initialState, hotSwap, hotSwap != nullptr);
+            BeginCommandList(table.state, state, allocator, initialState, pipelineObject, instrument);
         }
     }
 
@@ -531,16 +620,19 @@ HRESULT HookID3D12DeviceCreateCommandList(ID3D12Device *device, UINT nodeMask, D
     table.state->instrumentationController->ConditionalWaitForCompletion();
 
     // Get hot swap
-    ID3D12PipelineState *hotSwap = GetHotSwapPipeline(initialState);
+    PipelineInstrument *instrument = GetHotSwapPipeline(initialState);
+
+    // Active pipeline
+    ID3D12PipelineState* pipelineObject = instrument ? static_cast<ID3D12PipelineState*>(instrument->object) : Next(initialState);
 
     // Pass down callchain
-    HRESULT hr = table.bottom->next_CreateCommandList(table.next, nodeMask, GetEmulatedCommandListType(type), Next(allocator), hotSwap ? hotSwap : Next(initialState), __uuidof(ID3D12CommandList), reinterpret_cast<void **>(&commandList));
+    HRESULT hr = table.bottom->next_CreateCommandList(table.next, nodeMask, GetEmulatedCommandListType(type), Next(allocator), pipelineObject, __uuidof(ID3D12CommandList), reinterpret_cast<void **>(&commandList));
     if (FAILED(hr)) {
         return hr;
     }
 
     // Create state
-    return CreateCommandListState(device, commandList, type, allocator, initialState, hotSwap, true, riid, pCommandList);
+    return CreateCommandListState(device, commandList, type, allocator, GetState(initialState), pipelineObject, instrument, true, riid, pCommandList);
 }
 
 HRESULT WINAPI HookID3D12DeviceCreateCommandList1(ID3D12Device *device, UINT nodeMask, D3D12_COMMAND_LIST_TYPE type, D3D12_COMMAND_LIST_FLAGS flags, const IID &riid, void **pCommandList) {
@@ -559,7 +651,7 @@ HRESULT WINAPI HookID3D12DeviceCreateCommandList1(ID3D12Device *device, UINT nod
     }
 
     // Create state
-    return CreateCommandListState(device, commandList, type, nullptr, nullptr, nullptr, false, riid, pCommandList);
+    return CreateCommandListState(device, commandList, type, nullptr, nullptr, nullptr, nullptr, false, riid, pCommandList);
 }
 
 HRESULT WINAPI HookID3D12CommandListReset(ID3D12CommandList *list, ID3D12CommandAllocator *allocator, ID3D12PipelineState *state) {
@@ -572,16 +664,19 @@ HRESULT WINAPI HookID3D12CommandListReset(ID3D12CommandList *list, ID3D12Command
     device.state->instrumentationController->ConditionalWaitForCompletion();
 
     // Get hot swap
-    ID3D12PipelineState *hotSwap = GetHotSwapPipeline(state);
+    PipelineInstrument *instrument = GetHotSwapPipeline(state);
+
+    // Assigned object
+    ID3D12PipelineState* pipelineObject = instrument ? static_cast<ID3D12PipelineState*>(instrument->object) : Next(state);
 
     // Pass down callchain
-    HRESULT result = table.bottom->next_Reset(table.next, Next(allocator), hotSwap ? hotSwap : Next(state));
+    HRESULT result = table.bottom->next_Reset(table.next, Next(allocator), pipelineObject);
     if (FAILED(result)) {
         return result;
     }
 
     // Handle sub-systems
-    BeginCommandList(device.state, table.state, allocator, state, hotSwap, hotSwap != nullptr);
+    BeginCommandList(device.state, table.state, allocator, GetState(state), pipelineObject, instrument);
 
     // OK
     return S_OK;
@@ -736,6 +831,143 @@ void WINAPI HookID3D12CommandListCopyTextureRegion(ID3D12CommandList* list, cons
     table.bottom->next_CopyTextureRegion(table.next, &dst, DstX, DstY, DstZ, &src, pSrcBox);
 }
 
+ID3D12Resource* GetStreamingStateBackendMessages(CommandListState *state) {
+    auto device = GetTable(state->parent);
+
+    // Target messages
+    ShaderExportStreamStateBackendMessages& messages = state->streamState->backendMessages;
+
+    // Create if needed
+    if (!messages.allocation.resource) {
+        // Allocate buffer
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Alignment = 0;
+        desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        desc.Width = BackendMessageBufferSize;
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        desc.Format = DXGI_FORMAT_UNKNOWN;
+        desc.MipLevels = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.SampleDesc.Count = 1;
+        messages.allocation = device.state->deviceAllocator->Allocate(desc, AllocationResidency::HostVisible);
+    }
+
+    // Lazy clear
+    if (messages.pendingInitialization) {
+        uint32_t data = 0;
+        state->streamState->constantAllocator.StageData(
+            device.state->deviceAllocator, state->object,
+            messages.allocation.resource, 0,
+            &data, sizeof(data)
+        );
+    }
+
+    // OK
+    return messages.allocation.resource;
+}
+
+ShaderExportStreamStateBarrierTracking* GetBarrierTracking(CommandListState* state) {
+    // Allocate on demand
+    if (!state->streamState->barrierTracking) {
+        state->streamState->barrierTracking = new (state->allocators) ShaderExportStreamStateBarrierTracking();
+    }
+
+    // OK
+    return state->streamState->barrierTracking;
+}
+
+ShaderExportStreamStateRaytracingCache* GetRaytracingCache(CommandListState* state) {
+    // Allocate on demand
+    if (!state->streamState->raytracingCache) {
+        state->streamState->raytracingCache = new (state->allocators) ShaderExportStreamStateRaytracingCache();
+    }
+
+    // OK
+    return state->streamState->raytracingCache;
+}
+
+#ifndef NDEBUG
+void AddDebugStream(CommandListState *state, ID3D12Resource *resource, uint64_t offset, uint64_t length, D3D12_RESOURCE_STATES layout, const std::string &name) {
+    auto device = GetTable(state->parent);
+
+    // Transition to copy source
+    if (layout != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = layout;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        state->object->ResourceBarrier(1u, &barrier);
+    }
+
+    // Copy over device to host data
+    ShaderExportConstantAllocation hostAllocation = state->streamState->constantAllocator.Allocate(device.state->deviceAllocator, length);
+    state->object->CopyBufferRegion(
+        hostAllocation.resource, hostAllocation.offset,
+        resource, 0,
+        length
+    );
+
+    // Add to pending streaming
+    state->streamState->debugStreams.push_back(ShaderExportStreamStateDebugStream {
+        .name = name,
+        .resource = hostAllocation.resource,
+        .offset = hostAllocation.offset,
+        .length = length
+    });
+
+    // Transition to original
+    if (layout != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resource;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = layout;
+        state->object->ResourceBarrier(1u, &barrier);
+    }
+}
+
+void AddDebugStream(CommandListState* state, const ShaderExportDeviceAllocation& allocation, D3D12_RESOURCE_STATES layout, const std::string& name) {
+    AddDebugStream(state, allocation.allocation.resource, 0, allocation.length, layout, name);
+}
+#endif // NDEBUG
+
+static void HandleBarrierCacheInvalidation(CommandListState* state, ResourceState* resource) {
+    // No tracking? No invalidation
+    if (!state->streamState->barrierTracking) {
+        return;
+    }
+
+    // Find entry
+    auto it = state->streamState->barrierTracking->resources.find(resource);
+    if (it == state->streamState->barrierTracking->resources.end()) {
+        return;
+    }
+
+    // Invalidate raytracing state
+    if (it->second & ShaderExportStreamStateBarrierFlag::Raytracing) {
+        state->streamState->raytracingCache->Invalidate(resource);
+    }
+
+    // No longer tracked
+    state->streamState->barrierTracking->resources.erase(it);
+}
+
+static void HandleGlobalBarrierCacheInvalidation(CommandListState* state) {
+    // Remove all tracking
+    if (ShaderExportStreamStateBarrierTracking *tracking = state->streamState->barrierTracking) {
+        tracking->Clear();
+    }
+
+    // Clean all raytracing caches
+    if (ShaderExportStreamStateRaytracingCache *cache = state->streamState->raytracingCache) {
+        cache->Clear();
+    }
+}
+
 void WINAPI HookID3D12CommandListResourceBarrier(ID3D12CommandList* list, UINT NumBarriers, const D3D12_RESOURCE_BARRIER* pBarriers) {
     auto table = GetTable(list);
 
@@ -747,7 +979,12 @@ void WINAPI HookID3D12CommandListResourceBarrier(ID3D12CommandList* list, UINT N
         switch (pBarriers[i].Type) {
             case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION: {
                 D3D12_RESOURCE_BARRIER barrier = pBarriers[i];
-                barrier.Transition.pResource = Next(barrier.Transition.pResource);
+                
+                // Invalidate dependent caching
+                auto resourceTable = GetTable(barrier.Transition.pResource);
+                HandleBarrierCacheInvalidation(table.state, resourceTable.state);
+                
+                barrier.Transition.pResource = resourceTable.next;
                 barriers.Add(barrier);
                 break;
             }
@@ -756,6 +993,9 @@ void WINAPI HookID3D12CommandListResourceBarrier(ID3D12CommandList* list, UINT N
                 
                 if (barrier.Aliasing.pResourceBefore) {
                     auto resourceTable = GetTable(barrier.Aliasing.pResourceBefore);
+
+                    // Invalidate dependent caching
+                    HandleBarrierCacheInvalidation(table.state, resourceTable.state);
 
                     // If emulated, this barrier is irrelevant
                     if (resourceTable.state->isEmulatedComitted) {
@@ -767,6 +1007,9 @@ void WINAPI HookID3D12CommandListResourceBarrier(ID3D12CommandList* list, UINT N
                 
                 if (barrier.Aliasing.pResourceAfter) {
                     auto resourceTable = GetTable(barrier.Aliasing.pResourceAfter);
+
+                    // Invalidate dependent caching
+                    HandleBarrierCacheInvalidation(table.state, resourceTable.state);
                     
                     // If emulated, this barrier is irrelevant
                     if (resourceTable.state->isEmulatedComitted) {
@@ -783,7 +1026,14 @@ void WINAPI HookID3D12CommandListResourceBarrier(ID3D12CommandList* list, UINT N
                 D3D12_RESOURCE_BARRIER barrier = pBarriers[i];
                 
                 if (barrier.UAV.pResource) {
-                    barrier.UAV.pResource = Next(barrier.Transition.pResource);
+                    auto resourceTable = GetTable(barrier.Transition.pResource);
+                    barrier.UAV.pResource = resourceTable.next;
+
+                    // Invalidate dependent caching
+                    HandleBarrierCacheInvalidation(table.state, resourceTable.state);
+                } else {
+                    // Since we don't know what resource was referenced, just invalidate everything
+                    HandleGlobalBarrierCacheInvalidation(table.state);
                 }
                 
                 barriers.Add(barrier);
@@ -859,6 +1109,9 @@ void WINAPI HookID3D12CommandListBarrier(ID3D12CommandList *list, UINT NumBarrie
                 for (uint32_t barrierIndex = 0; barrierIndex < source.NumBarriers; barrierIndex++) {
                     globalBarriers[globalBarrierOffset + barrierIndex] = source.pGlobalBarriers[barrierIndex];
                 }
+
+                // Invalidate all caching
+                HandleGlobalBarrierCacheInvalidation(table.state);
                 
                 dest.pGlobalBarriers = globalBarriers.Data() + globalBarrierOffset;
                 globalBarrierOffset += source.NumBarriers;
@@ -868,7 +1121,12 @@ void WINAPI HookID3D12CommandListBarrier(ID3D12CommandList *list, UINT NumBarrie
                 // Unwrap texture
                 for (uint32_t barrierIndex = 0; barrierIndex < source.NumBarriers; barrierIndex++) {
                     D3D12_TEXTURE_BARRIER barrier = source.pTextureBarriers[barrierIndex];
-                    barrier.pResource = Next(barrier.pResource);
+                    auto resourceTable = GetTable(barrier.pResource);
+
+                    // Invalidate dependent caching
+                    HandleBarrierCacheInvalidation(table.state, resourceTable.state);
+                    
+                    barrier.pResource = resourceTable.next;
                     textureBarriers[textureBarrierOffset + barrierIndex] = barrier;
                 }
                 
@@ -880,7 +1138,12 @@ void WINAPI HookID3D12CommandListBarrier(ID3D12CommandList *list, UINT NumBarrie
                 // Unwrap buffer
                 for (uint32_t barrierIndex = 0; barrierIndex < source.NumBarriers; barrierIndex++) {
                     D3D12_BUFFER_BARRIER barrier = source.pBufferBarriers[barrierIndex];
-                    barrier.pResource = Next(barrier.pResource);
+                    auto resourceTable = GetTable(barrier.pResource);
+
+                    // Invalidate dependent caching
+                    HandleBarrierCacheInvalidation(table.state, resourceTable.state);
+                    
+                    barrier.pResource = resourceTable.next;
                     bufferBarriers[bufferBarrierOffset + barrierIndex] = barrier;
                 }
                 
@@ -938,7 +1201,370 @@ void WINAPI HookID3D12CommandListEndRenderPass(ID3D12CommandList* list) {
     ResolveRenderPassForUserEnd(table.next, &table.state->streamState->renderPass);
 }
 
-static void CommitGraphics(DeviceState* device, CommandListState* list) {
+static uint32_t AllocateRollingUID(DeviceState* state) {
+    // Allocate the identifier, we never want zero as that's reserved
+    for (;;) {
+        if (uint32_t rollingUID = state->rollingUIDs++; rollingUID != 0) {
+            return rollingUID;
+        }
+    }
+}
+
+void WINAPI HookID3D12CommandListRSSetViewports(ID3D12CommandList *list, UINT NumViewports, const D3D12_VIEWPORT *pViewports) {
+    auto table = GetTable(list);
+
+    if (NumViewports) {
+        table.state->streamState->viewport.state = pViewports[0];
+        table.state->streamState->viewport.rollingUID = AllocateRollingUID(GetState(table.state->parent));
+    }
+
+    // Pass down callchain
+    table.next->RSSetViewports(NumViewports, pViewports);
+}
+
+void ReconstructPipelineState(DeviceState *device, ID3D12GraphicsCommandList *commandList, ShaderExportStreamState* streamState) {
+    ShaderExportStreamBindState &bindState = streamState->bindStates[static_cast<uint32_t>(PipelineType::ComputeSlot)];
+
+    // Reset signature if needed
+    if (bindState.rootSignature) {
+        commandList->SetComputeRootSignature(bindState.rootSignature->object);
+    }
+
+    // Existing pipeline?
+    IUnknown* pipelineObject{nullptr};
+    if (streamState->pipelineObject) {
+        pipelineObject = streamState->pipelineObject;
+    } else if (streamState->pipeline) {
+        pipelineObject = streamState->pipeline->object;
+    }
+
+    // Bind based on type
+    if (pipelineObject) {
+        if (streamState->pipeline->type == PipelineType::StateObject) {
+            // TODO[rt]: Cast is unsafe!
+            static_cast<ID3D12GraphicsCommandList4*>(commandList)->SetPipelineState1(static_cast<ID3D12StateObject *>(pipelineObject));
+        } else {
+            commandList->SetPipelineState(static_cast<ID3D12PipelineState *>(pipelineObject));
+        }
+    }
+    
+    // Reset root data if needed, invalidated by signature change
+    if (bindState.rootSignature) {
+        for (uint32_t i = 0; i < bindState.rootSignature->logicalMapping.userRootCount; i++) {
+            const ShaderExportRootParameterValue &value = bindState.persistentRootParameters[i];
+
+            // Get the expected heap type
+            D3D12_DESCRIPTOR_HEAP_TYPE heapType = bindState.rootSignature->logicalMapping.userRootMappings[i].heapType;
+            
+            switch (value.type) {
+                case ShaderExportRootParameterValueType::None: {
+                    break;
+                }
+                case ShaderExportRootParameterValueType::Descriptor: {
+                    ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || heapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, "Unexpected heap type");
+                    commandList->SetComputeRootDescriptorTable(i, value.payload.descriptor);
+                    break;
+                }
+                case ShaderExportRootParameterValueType::SRV: {
+                    ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, "Unexpected heap type");
+                    commandList->SetComputeRootShaderResourceView(i, value.payload.virtualAddress);
+                    break;
+                }
+                case ShaderExportRootParameterValueType::UAV: {
+                    ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, "Unexpected heap type");
+                    commandList->SetComputeRootUnorderedAccessView(i, value.payload.virtualAddress);
+                    break;
+                }
+                case ShaderExportRootParameterValueType::CBV: {
+                    ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, "Unexpected heap type");
+                    commandList->SetComputeRootConstantBufferView(i, value.payload.virtualAddress);
+                    break;
+                }
+                case ShaderExportRootParameterValueType::Constant: {
+                    ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES, "Unexpected heap type");
+                    commandList->SetComputeRoot32BitConstants(
+                        i,
+                        value.payload.constant.dataByteCount / sizeof(uint32_t),
+                        value.payload.constant.data,
+                        0
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Compute overwritten at this point
+        streamState->pipelineSegmentMask &= ~PipelineTypeSet(PipelineType::Compute);
+
+        // Rebind the export, invalidated by signature change
+        if (streamState->pipeline) {
+            device->exportStreamer->BindShaderExport(streamState, streamState->pipeline, commandList);
+        }
+    }
+}
+
+void ReconstructRenderPassState(DeviceState *device, ID3D12GraphicsCommandList *commandList, ShaderExportStreamState* streamState) {
+    BeginRenderPassForReconstruction(static_cast<ID3D12GraphicsCommandList4*>(commandList), &streamState->renderPass);
+}
+
+void ReconstructHeapState(DeviceState *device, ID3D12GraphicsCommandList *commandList, ShaderExportStreamState* streamState) {
+    TrivialStackVector<ID3D12DescriptorHeap*, 2u> heaps;
+
+    if (streamState->resourceHeap) {
+        heaps.Add(streamState->resourceHeap->object);
+    }
+    
+    if (streamState->samplerHeap) {
+        heaps.Add(streamState->samplerHeap->object);
+    }
+
+    commandList->SetDescriptorHeaps(static_cast<UINT>(heaps.Size()), heaps.Data());
+}
+
+void ReconstructState(DeviceState *device, ID3D12GraphicsCommandList *commandList, ShaderExportStreamState* streamState, ReconstructionFlagSet flags) {
+    if (flags & ReconstructionFlag::Heap) {
+        ReconstructHeapState(device, commandList, streamState);
+    }
+    
+    if (flags & ReconstructionFlag::Pipeline) {
+        ReconstructPipelineState(device, commandList, streamState);
+    }
+
+    if (flags & ReconstructionFlag::RenderPass) {
+        ReconstructRenderPassState(device, commandList, streamState);
+    }
+}
+
+void ReconstructState(DeviceState *device, ID3D12GraphicsCommandList *commandList, ShaderExportStreamState* streamState) {
+    ReconstructionFlagSet flags = ReconstructionFlag::Pipeline | ReconstructionFlag::RootConstant | ReconstructionFlag::Heap;
+
+    if (streamState->renderPass.insideRenderPass) {
+        flags |= ReconstructionFlag::RenderPass;
+    }
+    
+    ReconstructState(device, commandList, streamState, flags);
+}
+
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif // _MSC_VER
+
+struct ALIGN_PACK PIXEvent3Header {
+    uint64_t encoding;
+    uint64_t color;
+    uint64_t formatEncoding;
+    wchar_t  format[1];
+};
+
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif // _MSC_VER
+
+static void DecodeAndPushMarker(ShaderExportStreamMarkerState& markers, UINT Metadata, const void *pData, UINT Size, bool hierarchical ) {
+    switch (Metadata) {
+        default: {
+            // Not implemented
+            break;
+        }
+        case WINPIX_EVENT_ANSI_VERSION: {
+            // Just a plain string
+            markers.stack.Add(ShaderExportStreamMarkerEntryState {
+                .hierarchical = hierarchical,
+                .hash32 = BufferCRC32Short(pData, Size)
+            });
+            break;
+        }
+        case WINPIX_EVENT_UNICODE_VERSION: {
+            const wchar_t* source = static_cast<const wchar_t*>(pData);
+            char*          dest   = ALLOCA_ARRAY(char, Size / sizeof(wchar_t));
+
+            // Convert
+            size_t length = std::wcslen(static_cast<const wchar_t *>(pData)) + 1;
+            wcstombs_s(&length, dest, length * sizeof(char), source, length * sizeof(wchar_t));
+
+            // Just a plain string
+            markers.stack.Add(ShaderExportStreamMarkerEntryState {
+                .hierarchical = hierarchical,
+                .hash32 = BufferCRC32Short(dest, Size)
+            });
+            break;
+        }
+        case D3D12_EVENT_METADATA: {
+            auto* dataU8 = static_cast<const uint8_t*>(pData);
+            auto* endU8  = dataU8 + Size;
+            if (Size < sizeof(PIXEvent3Header)) {
+                return;
+            }
+
+            // Always header
+            auto* header = reinterpret_cast<const PIXEvent3Header*>(dataU8);
+            dataU8 += sizeof(PIXEvent3Header);
+
+            // Get format
+            const wchar_t* format = header->format;
+            size_t formatLength = std::wcslen(format);
+            dataU8 += formatLength * sizeof(wchar_t);
+
+            // To Qword
+            if (reinterpret_cast<uint64_t>(dataU8) % sizeof(uint64_t)) {
+                dataU8 += sizeof(uint64_t) - reinterpret_cast<uint64_t>(dataU8) % sizeof(uint64_t);
+            }
+
+            // Get all arguments
+            TrivialStackVector<const wchar_t*, 16> args;
+            while (dataU8 < endU8 && (endU8 - dataU8) >= sizeof(uint64_t) + sizeof(wchar_t)) {
+                uint64_t encoding = *reinterpret_cast<const uint64_t*>(dataU8);
+                dataU8 += sizeof(uint64_t);
+
+                // Get argument
+                const wchar_t* argBegin = reinterpret_cast<const wchar_t*>(dataU8);
+                args.Add(argBegin);
+
+                // Skip
+                size_t lengthTerm = std::wcslen(argBegin) + 1;
+                dataU8 += lengthTerm * sizeof(wchar_t);
+
+                // To Qword
+                if (reinterpret_cast<uint64_t>(dataU8) % sizeof(uint64_t)) {
+                    dataU8 += sizeof(uint64_t) - reinterpret_cast<uint64_t>(dataU8) % sizeof(uint64_t);
+                }
+            }
+
+            // Current argument offset
+            uint32_t argumentOffset = 0;
+
+            // Format the text
+            TrivialStackVector<char, 1024> formatted;
+            for (uint32_t i = 0; i < formatLength; i++) {
+                if (format[i] != '%' || i >= formatLength - 1) {
+                    formatted.Add(static_cast<char>(format[i]));
+                    continue;
+                }
+
+                i++;
+
+                // Bad format?
+                if (argumentOffset >= args.Size()) {
+                    break;
+                }
+
+                // Handle formatting
+                switch (format[i]) {
+                    case L's':
+                    case L'S': {
+                        uint64_t len = std::wcslen(args[argumentOffset]);
+                        formatted.Reserve(formatted.Size() + len);
+
+                        for (uint32_t argChIndex = 0; argChIndex < len; argChIndex++) {
+                            formatted.Add(static_cast<char>(args[argumentOffset][argChIndex]));
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Just a plain string
+            markers.stack.Add(ShaderExportStreamMarkerEntryState {
+                .hierarchical = hierarchical,
+                .hash32 = BufferCRC32Short(formatted.Data(), formatted.Size())
+            });
+            break;
+        }
+    }
+}
+
+void WINAPI HookID3D12CommandListSetMarker(ID3D12CommandList *list, UINT Metadata, const void *pData, UINT Size) {
+    auto table = GetTable(list);
+
+    // Pass down
+    table.next->SetMarker(Metadata, pData, Size);
+    
+    // Accommodation check
+    ShaderExportStreamMarkerState &markers = table.state->streamState->markers;
+    if (markers.stack.Size()) {
+        ShaderExportStreamMarkerEntryState &last = markers.stack[markers.stack.Size() - 1];
+
+        // If hierarchical and out of space? Bail.
+        if (!last.hierarchical && markers.stack.Size() >= kMaxExecutionInfoMarkerCount) {
+            return;
+        }
+    }
+
+    // Actually decode it
+    DecodeAndPushMarker(markers, Metadata, pData, Size, false);
+}
+
+void WINAPI HookID3D12CommandListBeginEvent(ID3D12CommandList *list, UINT Metadata, const void *pData, UINT Size) {
+    auto table = GetTable(list);
+
+    // Pass down
+    table.next->BeginEvent(Metadata, pData, Size);
+    
+    // Accommodation check
+    ShaderExportStreamMarkerState &markers = table.state->streamState->markers;
+    if (markers.stack.Size() >= kMaxExecutionInfoMarkerCount) {
+        return;
+    }
+
+    // Actually decode it
+    DecodeAndPushMarker(markers, Metadata, pData, Size, true);
+}
+
+void WINAPI HookID3D12CommandListEndEvent(ID3D12CommandList *list) {
+    auto table = GetTable(list);
+
+    // Pass down
+    table.next->EndEvent();
+
+    // Accommodation check
+    ShaderExportStreamMarkerState &markers = table.state->streamState->markers;
+    if (!markers.stack.Size()) {
+        return;
+    }
+
+    // If non-hierarchical, pop that too  
+    ShaderExportStreamMarkerEntryState &last = markers.stack[markers.stack.Size() - 1];
+    if (!last.hierarchical) {
+        markers.stack.PopBack();
+    }
+
+    // Pop the hierarchical event
+    if (markers.stack.Size()) {
+        markers.stack.PopBack();
+    }
+}
+
+static ExecutionInfo GetBaseExecutionInfo(CommandListState* state) {
+    DeviceState* device = GetState(state->parent);
+
+    // Default info
+    ExecutionInfo info{};
+
+    // Allocate the identifier, we never want zero as that's reserved
+    info.rollingExecutionUID = AllocateRollingUID(device);
+    info.rollingViewportUID = state->streamState->viewport.rollingUID;
+
+    // Pipeline is optional
+    info.pipelineUID = state->streamState->pipeline ? static_cast<uint32_t>(state->streamState->pipeline->uid) : 0;
+
+    // Fill marker hashes
+    for (uint32_t i = 0; i < kMaxExecutionInfoMarkerCount; i++) {
+        if (i < state->streamState->markers.stack.Size()) {
+            info.markerHashes32[i] = state->streamState->markers.stack[i].hash32;
+        } else {
+            info.markerHashes32[i] = 0;
+        }
+    }
+
+    // Set the viewport
+    info.viewport.width = static_cast<uint32_t>(state->streamState->viewport.state.Width);
+    info.viewport.height = static_cast<uint32_t>(state->streamState->viewport.state.Height);
+
+    // OK
+    return info;
+}
+
+void CommitGraphics(DeviceState* device, CommandListState* list) {
     // Commit all commands prior to binding
     CommitCommands(list);
 
@@ -964,7 +1590,7 @@ static void CommitGraphics(DeviceState* device, CommandListState* list) {
     }
 }
 
-static void CommitCompute(DeviceState* device, CommandListState* list) {
+void CommitCompute(DeviceState* device, CommandListState* list) {
     // Commit all commands prior to binding
     CommitCommands(list);
 
@@ -990,12 +1616,34 @@ static void CommitCompute(DeviceState* device, CommandListState* list) {
     }
 }
 
+static bool UsesExecutionInfo(CommandListState* state) {
+    // No instrument, no execution info
+    if (!state->streamState->pipelineInstrument) {
+        return false;
+    }
+
+    // Check if any shader in the pipeline uses execution info
+    return state->streamState->pipelineInstrument->featureTable.executionInfo;
+}
+
 void WINAPI HookID3D12CommandListDrawInstanced(ID3D12CommandList* list, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation) {
     auto table = GetTable(list);
 
     // Get device
     auto device = GetTable(table.state->parent);
 
+    // Append execution info, if used
+    if (UsesExecutionInfo(table.state)) {
+        ExecutionInfo info = GetBaseExecutionInfo(table.state);
+        info.executionFlags = ExecutionFlag::TypeDraw;
+        info.draw.drawFlags = ExecutionDrawFlag::VertexCountPerInstance | ExecutionDrawFlag::InstanceCount | ExecutionDrawFlag::StartVertex | ExecutionDrawFlag::StartInstance;
+        info.draw.vertexCountPerInstance = VertexCountPerInstance;
+        info.draw.instanceCount = InstanceCount;
+        info.draw.startVertex = StartVertexLocation;
+        info.draw.startInstance = StartInstanceLocation;
+        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Graphics, info);
+    }
+    
     // Commit all pending graphics
     CommitGraphics(device.state, table.state);
 
@@ -1009,6 +1657,19 @@ void WINAPI HookID3D12CommandListDrawIndexedInstanced(ID3D12CommandList* list, U
     // Get device
     auto device = GetTable(table.state->parent);
 
+    // Append execution info, if used
+    if (UsesExecutionInfo(table.state)) {
+        ExecutionInfo info = GetBaseExecutionInfo(table.state);
+        info.executionFlags = ExecutionFlag::TypeDraw;
+        info.draw.drawFlags = ExecutionDrawFlag::IndexCountPerInstance | ExecutionDrawFlag::InstanceCount | ExecutionDrawFlag::StartVertex | ExecutionDrawFlag::StartIndex;
+        info.draw.indexCountPerInstance = IndexCountPerInstance;
+        info.draw.instanceCount = InstanceCount;
+        info.draw.instanceOffset = StartInstanceLocation;
+        info.draw.startIndex = StartIndexLocation;
+        info.draw.startVertex = BaseVertexLocation;
+        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Graphics, info);
+    }
+
     // Commit all pending graphics
     CommitGraphics(device.state, table.state);
 
@@ -1021,6 +1682,16 @@ void WINAPI HookID3D12CommandListDispatch(ID3D12CommandList* list, UINT ThreadGr
 
     // Get device
     auto device = GetTable(table.state->parent);
+    
+    // Append execution info, if used
+    if (UsesExecutionInfo(table.state)) {
+        ExecutionInfo info = GetBaseExecutionInfo(table.state);
+        info.executionFlags = ExecutionFlag::TypeDispatch;
+        info.dispatch.groupCountX = ThreadGroupCountX;
+        info.dispatch.groupCountY = ThreadGroupCountY;
+        info.dispatch.groupCountZ = ThreadGroupCountZ;
+        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Compute, info);
+    }
 
     // Commit all pending compute
     CommitCompute(device.state, table.state);
@@ -1034,6 +1705,13 @@ void WINAPI HookID3D12CommandListDispatchMesh(ID3D12CommandList* list, UINT Thre
 
     // Get device
     auto device = GetTable(table.state->parent);
+    
+    // Append execution info, if used
+    if (UsesExecutionInfo(table.state)) {
+        ExecutionInfo info = GetBaseExecutionInfo(table.state);
+        info.executionFlags = ExecutionFlag::TypeDraw;
+        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Graphics, info);
+    }
 
     // Commit all pending graphics
     CommitGraphics(device.state, table.state);
@@ -1075,7 +1753,7 @@ void WINAPI HookID3D12CommandListSetComputeRoot32BitConstants(ID3D12CommandList 
     auto device = GetTable(table.state->parent);
 
     // Inform the streamer
-    device.state->exportStreamer->SetComputeRootConstants(table.state->streamState, RootParameterIndex, &pSrcData, sizeof(UINT) * Num32BitValuesToSet, DestOffsetIn32BitValues);
+    device.state->exportStreamer->SetComputeRootConstants(table.state->streamState, RootParameterIndex, pSrcData, sizeof(UINT) * Num32BitValuesToSet, DestOffsetIn32BitValues);
 
     // Pass down call chain
     table.next->SetComputeRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
@@ -1088,7 +1766,7 @@ void WINAPI HookID3D12CommandListSetGraphicsRoot32BitConstants(ID3D12CommandList
     auto device = GetTable(table.state->parent);
 
     // Inform the streamer
-    device.state->exportStreamer->SetGraphicsRootConstants(table.state->streamState, RootParameterIndex, &pSrcData, sizeof(UINT) * Num32BitValuesToSet, DestOffsetIn32BitValues);
+    device.state->exportStreamer->SetGraphicsRootConstants(table.state->streamState, RootParameterIndex, pSrcData, sizeof(UINT) * Num32BitValuesToSet, DestOffsetIn32BitValues);
 
     // Pass down call chain
     table.next->SetGraphicsRoot32BitConstants(RootParameterIndex, Num32BitValuesToSet, pSrcData, DestOffsetIn32BitValues);
@@ -1103,25 +1781,138 @@ void WINAPI HookID3D12CommandListExecuteIndirect(ID3D12CommandList* list, ID3D12
     // Get signature
     auto signatureTable = GetTable(pCommandSignature);
 
-    // Commit compute if needed
-    if (signatureTable.state->activeTypes & PipelineType::Compute) {
-        device.state->exportStreamer->CommitCompute(table.state->streamState, table.state->object);
-    }
-    
-    // Commit graphics if needed
-    if (signatureTable.state->activeTypes & PipelineType::Graphics) {
-        device.state->exportStreamer->CommitGraphics(table.state->streamState, table.state->object);
+    // Append execution info, if used
+    // TODO[dbg]: The execution info has to be filled in GPU-side, we can't know the payloads here
+    if (UsesExecutionInfo(table.state)) {
+        ExecutionInfo info = GetBaseExecutionInfo(table.state);
+        info.executionFlags = ExecutionFlag::TypeIndirect;
+        
+        switch (table.state->streamState->pipeline->type) {
+            default:
+                ASSERT(false, "Unexpected state");
+                break;
+            case PipelineType::Graphics:
+                info.executionFlags |= ExecutionFlag::TypeDraw;
+                break;
+            case PipelineType::Compute:
+                info.executionFlags |= ExecutionFlag::TypeDispatch;
+                break;
+            case PipelineType::StateObject:
+                // TODO[dbg]: Won't hold true with WG
+                info.executionFlags |= ExecutionFlag::TypeRaytracing;
+                break;
+        }
+        
+        // Set compute info if needed
+        if (signatureTable.state->activeTypes & PipelineType::Compute) {
+            device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Compute, info);
+        }
+
+        // Set graphics info if needed
+        if (signatureTable.state->activeTypes & PipelineType::Graphics) {
+            device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Graphics, info);
+        }
     }
 
-    // Pass down callchain
-    table.next->ExecuteIndirect(
-        signatureTable.next, 
-        MaxCommandCount, 
-        Next(pArgumentBuffer), 
-        ArgumentBufferOffset, 
-        Next(pCountBuffer), 
-        CountBufferOffset
-    );
+    // If there's a proxy, we need to create the destination arguments
+    if (table.state->proxies.featureBitSet_ExecuteIndirect) {
+        // Effective length of the commands
+        uint32_t commandByteLength = signatureTable.state->byteStride * MaxCommandCount;
+        
+        // Create dest command allocation
+        ShaderExportDeviceAllocation destAllocation = table.state->streamState->deviceAllocator.Allocate(device.state->deviceAllocator, commandByteLength);
+
+        // Transient resource state
+        ResourceState destState {
+            .object = destAllocation.allocation.resource,
+            .desc = destAllocation.allocation.resource->GetDesc(),
+            .uid = kResourceUIDTransient
+        };
+
+        // Allocate new PUID's for lookups
+        destState.virtualMapping.token.puid = device.state->physicalResourceIdentifierMap.AllocatePUID(&destState);
+
+        // Source Indirect -> Copy
+        // TODO[cmd]: This is incorrect, it could be masked
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = Next(pArgumentBuffer);
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        table.next->ResourceBarrier(1u, &barrier);
+
+        // Copy over the source commands
+        table.next->CopyBufferRegion(
+            destAllocation.allocation.resource, 0,
+            Next(pArgumentBuffer), ArgumentBufferOffset,
+            commandByteLength
+        );
+
+        // Source Copy -> Indirect
+        barrier.Transition.pResource = Next(pArgumentBuffer);
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+        table.next->ResourceBarrier(1u, &barrier);
+
+        // Dest Copy -> Unordered
+        barrier.Transition.pResource = destAllocation.allocation.resource;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        table.next->ResourceBarrier(1u, &barrier);
+
+        // Invoke proxies
+        if (ApplyFeatureHook<FeatureHook_ExecuteIndirect>(
+            table.state,
+            table.state->proxies.context,
+            table.state->proxies.featureBitSet_ExecuteIndirect,
+            table.state->proxies.featureHooks_ExecuteIndirect,
+            pCommandSignature, MaxCommandCount, pArgumentBuffer,
+            ArgumentBufferOffset, pCountBuffer, CountBufferOffset,
+            &destState
+        )) {
+            CommitCommands(table.state);
+        }
+
+        // Unordered -> Indirect
+        barrier.Transition.pResource = destAllocation.allocation.resource;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
+        table.next->ResourceBarrier(1u, &barrier);
+
+        // Free the transient PUID's
+        device.state->physicalResourceIdentifierMap.FreePUID(destState.virtualMapping.token.puid);
+
+        // Overwrite the argument buffer
+        // Subsequent patching/instrumentation will work on the proxy-modified arguments
+        pArgumentBuffer      = destAllocation.allocation.resource;
+        ArgumentBufferOffset = 0;
+    }
+
+    // State object (raytracing) EI's require patching
+    if (signatureTable.state->activeTypes & PipelineType::StateObject) {
+        // Let the indirect raytracing handle it
+        HookID3D12CommandListExecuteIndirectRaytracing(list, pCommandSignature, MaxCommandCount, pArgumentBuffer, ArgumentBufferOffset, pCountBuffer, CountBufferOffset);
+    } else {
+        // Commit compute if needed
+        if (signatureTable.state->activeTypes & PipelineType::Compute) {
+            device.state->exportStreamer->CommitCompute(table.state->streamState, table.state->object);
+        }
+    
+        // Commit graphics if needed
+        if (signatureTable.state->activeTypes & PipelineType::Graphics) {
+            device.state->exportStreamer->CommitGraphics(table.state->streamState, table.state->object);
+        }
+        
+        // No patching, just pass down callchain
+        table.next->ExecuteIndirect(
+            signatureTable.next, 
+            MaxCommandCount, 
+            ConditionalNext(pArgumentBuffer),
+            ArgumentBufferOffset, 
+            Next(pCountBuffer), 
+            CountBufferOffset
+        );
+    }
 }
 
 void WINAPI HookID3D12CommandListCopyTiles(ID3D12CommandList *list, ID3D12Resource* pTiledResource, const D3D12_TILED_RESOURCE_COORDINATE* pTileRegionStartCoordinate, const D3D12_TILE_REGION_SIZE* pTileRegionSize, ID3D12Resource* pBuffer, UINT64 BufferStartOffsetInBytes, D3D12_TILE_COPY_FLAGS Flags) {
@@ -1195,23 +1986,64 @@ void WINAPI HookID3D12CommandListSetPipelineState(ID3D12CommandList *list, ID3D1
 
     // Get pipeline
     PipelineState* pipelineState = GetState(pipeline);
+    ASSERT(pipelineState->type == PipelineType::Graphics || pipelineState->type == PipelineType::Compute, "Unexpected pipeline state");
     
     // Get hot swap
-    ID3D12PipelineState *hotSwap = pipelineState->hotSwapObject.load();
+    PipelineInstrument *instrument = pipelineState->hotSwapObject.load();
 
     // Conditionally wait for instrumentation if the pipeline has an outstanding request
-    if (!hotSwap && pipelineState->HasInstrumentationRequest()) {
+    if (!instrument && pipelineState->HasInstrumentationRequest()) {
         device.state->instrumentationController->ConditionalWaitForCompletion();
 
         // Load new hot-object
-        hotSwap = pipelineState->hotSwapObject.load();
+        instrument = pipelineState->hotSwapObject.load();
     }
 
+    // Active pipeline
+    ID3D12PipelineState* pipelineObject = instrument ? static_cast<ID3D12PipelineState*>(instrument->object) : Next(pipeline);
+
+    // Update last used
+    pipelineState->lastUsedTimestampNS.store(device.state->syncPointActionThread.GetLastTimeSinceEpochNS(), std::memory_order::relaxed);
+
     // Pass down callchain
-    table.bottom->next_SetPipelineState(table.next, hotSwap ? hotSwap : Next(pipeline));
+    table.bottom->next_SetPipelineState(table.next, pipelineObject);
 
     // Inform the streamer of a new pipeline
-    device.state->exportStreamer->BindPipeline(table.state->streamState, pipelineState, hotSwap, hotSwap != nullptr, table.state->object);
+    device.state->exportStreamer->BindPipeline(table.state->streamState, pipelineState, pipelineObject, instrument, table.state->object);
+}
+
+void WINAPI HookID3D12CommandListSetPipelineState1(ID3D12CommandList *list, ID3D12StateObject *stateObject) {
+    auto table = GetTable(list);
+
+    // Get device
+    auto device = GetTable(table.state->parent);
+
+    // Get state
+    StateObjectState* stateObjectState = GetState(stateObject);
+    ASSERT(stateObjectState->type == PipelineType::StateObject, "Unexpected state object state");
+    
+    // Get hot swap
+    PipelineInstrument *instrument = stateObjectState->hotSwapObject.load();
+
+    // Conditionally wait for instrumentation if the pipeline has an outstanding request
+    if (!instrument && stateObjectState->HasInstrumentationRequest()) {
+        device.state->instrumentationController->ConditionalWaitForCompletion();
+
+        // Load new hot-object
+        instrument = stateObjectState->hotSwapObject.load();
+    }
+
+    // Active pipeline
+    ID3D12StateObject* pipelineObject = instrument ? static_cast<ID3D12StateObject*>(instrument->object) : Next(stateObject);
+
+    // Update last used
+    stateObjectState->lastUsedTimestampNS.store(device.state->syncPointActionThread.GetLastTimeSinceEpochNS(), std::memory_order::relaxed);
+
+    // Pass down callchain
+    table.bottom->next_SetPipelineState1(table.next, pipelineObject);
+
+    // Inform the streamer of a new pipeline
+    device.state->exportStreamer->BindPipeline(table.state->streamState, stateObjectState, pipelineObject, instrument, table.state->object);
 }
 
 AGSReturnCode HookAMDAGSDestroyDevice(AGSContext* context, ID3D12Device* device, unsigned int* deviceReferences) {
@@ -1286,6 +2118,9 @@ static ID3D12GraphicsCommandList* RecordExecutePreCommandList(const CommandQueue
         
         // Clear all commands
         context.commandContext.buffer.Clear();
+        
+        // Create streamer allocation association
+        device.state->exportStreamer->MapSegment(context.streamState, patchList, segment);
     }
 
     // Done
@@ -1327,6 +2162,9 @@ static ID3D12GraphicsCommandList* RecordExecutePostCommandList(const CommandQueu
         
         // Clear all commands
         context.commandContext.buffer.Clear();
+        
+        // Create streamer allocation association
+        device.state->exportStreamer->MapSegment(context.streamState, patchList, segment);
     }
 
     // Done
@@ -1358,6 +2196,12 @@ void HookID3D12CommandQueueExecuteCommandLists(ID3D12CommandQueue *queue, UINT c
     if (count == 0) {
         BridgeDeviceSyncPoint(device.state, table.state);
     }
+
+    // Process all pending descriptor states
+    // To reduce general (heap) register pressure, we check the pending completion states independently of the existing lifetime,
+    // latter which is tied to the command allocators. This greatly helps reduce the amount of concurrent descriptor states,
+    // and avoid exhausted heap issues.
+    device.state->exportStreamer->ProcessDescriptors();
 
     // Allocate submission segment
     ShaderExportStreamSegment* segment = device.state->exportStreamer->AllocateSegment();

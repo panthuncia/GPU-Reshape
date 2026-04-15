@@ -41,16 +41,19 @@
 
 // Backend
 #include <Backend/IL/PrettyPrint.h>
+#include <Backend/IL/Program.h>
 
 // Schemas
 #include <Schemas/SGUID.h>
 #include <Schemas/ShaderMetadata.h>
 #include <Schemas/PipelineMetadata.h>
 #include <Schemas/Object.h>
+#include <Schemas/Diagnostic.h>
+
+// Common
+#include <Common/Dispatcher/Dispatcher.h>
 
 // Std
-#include "Backend/IL/Program.h"
-
 #include <sstream>
 
 MetadataController::MetadataController(DeviceState* device) : device(device) {
@@ -69,6 +72,7 @@ bool MetadataController::Install() {
 
     // Get components
     shaderCompiler = registry->Get<ShaderCompiler>();
+    dispatcher = registry->Get<Dispatcher>();
 
     // OK
     return true;
@@ -104,6 +108,14 @@ void MetadataController::Handle(const MessageStream *streams, uint32_t count) {
                     OnMessage(*it.Get<GetShaderILMessage>());
                     break;
                 }
+                case SetUseShaderExternalReferenceMessage::kID: {
+                    OnMessage(*it.Get<SetUseShaderExternalReferenceMessage>());
+                    break;
+                }
+                case ReleaseShaderMessage::kID: {
+                    OnMessage(*it.Get<ReleaseShaderMessage>());
+                    break;
+                }
                 case GetShaderBlockGraphMessage::kID: {
                     OnMessage(*it.Get<GetShaderBlockGraphMessage>());
                     break;
@@ -124,6 +136,22 @@ void MetadataController::Handle(const MessageStream *streams, uint32_t count) {
                     OnMessage(*it.Get<GetShaderSourceMappingMessage>());
                     break;
                 }
+                case GetPipelineStatusMessage::kID: {
+                    OnMessage(*it.Get<GetPipelineStatusMessage>());
+                    break;
+                }
+                case GetShaderStatusMessage::kID: {
+                    OnMessage(*it.Get<GetShaderStatusMessage>());
+                    break;
+                }
+                case GetShaderInstructionMappingMessage::kID: {
+                    OnMessage(*it.Get<GetShaderInstructionMappingMessage>());
+                    break;
+                }
+                case GetShaderSourceInstructionMappingMessage::kID: {
+                    OnMessage(*it.Get<GetShaderSourceInstructionMappingMessage>());
+                    break;
+                }
             }
         }
     }
@@ -135,6 +163,11 @@ void MetadataController::OnMessage(const GetPipelineNameMessage& message) {
     // Attempt to find shader with given UID
     PipelineState* pipeline = device->states_Pipelines.GetFromUID(message.pipelineUID);
 
+    // TODO: Report back if it was found or not
+    if (!pipeline) {
+        return;
+    }
+    
     // Determine name
     const char* name = pipeline->debugName ? pipeline->debugName : "Unknown";
 
@@ -154,6 +187,9 @@ void MetadataController::OnMessage(const GetPipelineNameMessage& message) {
         case PipelineType::Compute:
             file->type = 2;
             break;
+        case PipelineType::StateObject:
+            file->type = 3;
+            break;
     }
 }
 
@@ -171,27 +207,80 @@ void MetadataController::OnMessage(const GetShaderNameMessage &message) {
     file->found = false;
 }
 
+template<typename T>
+bool MetadataController::InitializeModuleDeferred(ShaderState *shader, const T& message, bool allowDeferred) {
+    std::lock_guard moduleGuad(shader->mutex);
+
+    // Already initialized?
+    if (shader->module) {
+        return true;
+    }
+
+    // Async handling?
+    if (allowDeferred) {
+        shader->AddUser();
+        jobCount++;
+
+        // Submit job
+        dispatcher->Add(
+            BindDelegate(this, MetadataController::WorkerDeferredInitializeModule),
+            new (registry->GetAllocators()) DeferredJobData{
+                .shader = shader,
+                .message = message
+            }
+        );
+
+        // Handle it later
+        return false;
+    }
+    
+    // Otherwise, sync create it
+    if (shaderCompiler) {
+        shaderCompiler->InitializeModuleNoLock(shader);
+    }
+
+    return true;
+}
+
+void MetadataController::InitializeModule(ShaderState *shader) {
+    std::lock_guard moduleGuad(shader->mutex);
+
+    // Already initialized?
+    if (shader->module) {
+        return;
+    }
+    
+    // Otherwise, sync create it
+    if (shaderCompiler) {
+        shaderCompiler->InitializeModuleNoLock(shader);
+    }
+}
+
 void MetadataController::OnMessage(const GetShaderCodeMessage& message) {
     MessageStreamView view(stream);
 
     // Attempt to find shader with given UID
     ShaderState* shader = device->states_Shaders.GetFromUID(message.shaderUID);
 
-    // Create module if not present
-    if (shaderCompiler && shader && !shader->module) {
-        shaderCompiler->InitializeModule(shader);
+    // Module initialization
+    if (shader && !InitializeModuleDeferred(shader, message, message.deferred)) {
+        return;
     }
 
     // Failed?
     if (!shader || !shader->module) {
         auto&& response = view.Add<ShaderCodeMessage>();
         response->shaderUID = message.shaderUID;
+        response->poolCode = message.poolCode;
         response->found = false;
         return;
     }
 
     // Get the language
     const char* language = shader->module->GetLanguage();
+
+    // Is this module optimized?
+    bool optimized = shader->module->IsOptimized();
 
     // Get debug module
     IDXDebugModule* debugModule = shader->module->GetDebug();
@@ -204,6 +293,7 @@ void MetadataController::OnMessage(const GetShaderCodeMessage& message) {
         response->found = true;
         response->native = true;
         response->language.Set(language);
+        response->optimized = optimized;
         response->fileCount = 0;
         response->poolCode = message.poolCode;
         return;
@@ -218,6 +308,7 @@ void MetadataController::OnMessage(const GetShaderCodeMessage& message) {
     response->found = true;
     response->native = false;
     response->language.Set(language);
+    response->optimized = optimized;
     response->fileCount = fileCount;
     response->poolCode = message.poolCode;
 
@@ -247,9 +338,9 @@ void MetadataController::OnMessage(const GetShaderILMessage& message) {
     // Attempt to find shader with given UID
     ShaderState* shader = device->states_Shaders.GetFromUID(message.shaderUID);
 
-    // Create module if not present
-    if (shaderCompiler && shader && !shader->module) {
-        shaderCompiler->InitializeModule(shader);
+    // Module initialization
+    if (shader) {
+        InitializeModule(shader);
     }
 
     // Failed?
@@ -271,15 +362,101 @@ void MetadataController::OnMessage(const GetShaderILMessage& message) {
     file->program.Set(ilStream.str());
 }
 
+void MetadataController::OnMessage(const struct ReleaseShaderMessage &message) {
+    // Release if found
+    if (ShaderState* shader = device->states_Shaders.GetFromUID(message.shaderUID)) {
+        if (shader->hasExternalReference) {
+            destroyRef(shader, allocators);
+            shader->hasExternalReference = false;
+        } else {
+            device->logBuffer->Add("DX12", LogSeverity::Error, "Releasing shader without external reference");
+        }
+    }
+}
+
+void MetadataController::OnMessage(const struct SetUseShaderExternalReferenceMessage &message) {
+    useShaderExternalReference = message.enabled;
+}
+
+static bool IsPipelineActive(PipelineState* pipeline, std::chrono::nanoseconds referencePoint) {
+    auto nsEpochLastUsed = std::chrono::nanoseconds(pipeline->lastUsedTimestampNS.load(std::memory_order_relaxed));
+    auto secondSinceLast = std::chrono::duration_cast<std::chrono::seconds>(referencePoint - nsEpochLastUsed).count();
+
+    // Very arbitrary, anything of relevance here?
+    return secondSinceLast <= 5;
+}
+
+void MetadataController::OnMessage(const struct GetPipelineStatusMessage &message) {
+    MessageStream statusStream;
+
+    // Reference point for "active" state
+    auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch());
+
+    // Retrieve status for each pipeline
+    for (uint32_t i = 0; i < message.pipelineUIDs.count; i++) {
+        uint64_t uid = message.pipelineUIDs[i];
+
+        // Try to get pipeline
+        PipelineState* pipeline = device->states_Pipelines.GetFromUID(uid);
+        if (!pipeline) {
+            continue;
+        }
+
+        // Add status
+        auto* status = MessageStreamView<PipelineStatusMessage>(statusStream).Add();
+        status->pipelineUID = uid;
+        status->active = IsPipelineActive(pipeline, now);
+        status->instrumented = pipeline->hotSwapObject.load() != nullptr;
+    }
+
+    // Submit response
+    auto&& response = MessageStreamView(stream).Add<PipelineStatusCollectionMessage>(PipelineStatusCollectionMessage::AllocationInfo { .statusByteSize = statusStream.GetByteSize() });
+    response->status.Set(statusStream);
+}
+
+void MetadataController::OnMessage(const struct GetShaderStatusMessage &message) {
+    MessageStream statusStream;
+
+    // Reference point for "active" state
+    auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::high_resolution_clock::now().time_since_epoch());
+
+    // Retrieve status for each shader
+    for (uint32_t i = 0; i < message.shaderUIDs.count; i++) {
+        uint64_t uid = message.shaderUIDs[i];
+
+        // Try to get shader
+        ShaderState* shader = device->states_Shaders.GetFromUID(uid);
+        if (!shader) {
+            continue;
+        }
+
+        // Add status
+        auto* status = MessageStreamView<ShaderStatusMessage>(statusStream).Add();
+        status->shaderUID = uid;
+        status->active = false;
+        status->instrumented = false;
+        
+        // Check if any dependent pipeline is active
+        for (PipelineState* pipeline : device->dependencies_shaderPipelines.Get(shader)) {
+            status->active       |= IsPipelineActive(pipeline, now) ? 1 : 0;
+            status->instrumented |= pipeline->hotSwapObject.load() != nullptr;
+        }
+    }
+
+    // Submit response
+    auto&& response = MessageStreamView(stream).Add<ShaderStatusCollectionMessage>(ShaderStatusCollectionMessage::AllocationInfo { .statusByteSize = statusStream.GetByteSize() });
+    response->status.Set(statusStream);
+}
+
 void MetadataController::OnMessage(const GetShaderBlockGraphMessage& message) {
     MessageStreamView view(stream);
 
     // Attempt to find shader with given UID
     ShaderState* shader = device->states_Shaders.GetFromUID(message.shaderUID);
-
-    // Create module if not present
-    if (shaderCompiler && shader && !shader->module) {
-        shaderCompiler->InitializeModule(shader);
+    
+    // Module initialization
+    if (shader) {
+        InitializeModule(shader);
     }
 
     // Failed?
@@ -329,7 +506,9 @@ void MetadataController::OnMessage(const struct GetObjectStatesMessage& message)
     // Add response (linear locks)
     auto&& response = view.Add<ObjectStatesMessage>();
     response->shaderCount = static_cast<uint32_t>(device->states_Shaders.GetLinear().object.size());
+    response->shaderUIDHead = static_cast<uint32_t>(device->states_Shaders.GetUIDHead());
     response->pipelineCount = static_cast<uint32_t>(device->states_Pipelines.GetLinear().object.size());
+    response->pipelineUIDHead = static_cast<uint32_t>(device->states_Pipelines.GetUIDHead());
 }
 
 void MetadataController::OnMessage(const struct GetShaderUIDRangeMessage& message) {
@@ -407,10 +586,174 @@ void MetadataController::OnMessage(const struct GetShaderSourceMappingMessage& m
     response->contents.Set(sourceContents);
 }
 
+void MetadataController::OnMessage(const struct GetShaderInstructionMappingMessage& message) {
+    MessageStreamView view(stream);
+
+    // Attempt to find shader with given UID
+    ShaderState* shader = device->states_Shaders.GetFromUID(message.shaderGUID);
+
+    // Module initialization
+    if (shader) {
+        InitializeModule(shader);
+    }
+
+    // Failed?
+    if (!shader || !shader->module) {
+        auto&& response = view.Add<ShaderInstructionMappingSetMessage>(ShaderInstructionMappingSetMessage::AllocationInfo { .mappingsByteSize = 0 });
+        response->shaderGUID = message.shaderGUID;
+        response->fileUID = message.fileUID;
+        response->line = message.line;
+        response->found = false;
+        return;
+    }
+
+    // Get debug module
+    IDXDebugModule* debugModule = shader->module->GetDebug();
+
+    // No sources available?
+    if (!debugModule) {
+        auto&& response = view.Add<ShaderInstructionMappingSetMessage>(ShaderInstructionMappingSetMessage::AllocationInfo { .mappingsByteSize = 0 });
+        response->shaderGUID = message.shaderGUID;
+        response->fileUID = message.fileUID;
+        response->line = message.line;
+        response->found = false;
+        return;
+    }
+
+    // Create mappings set
+    MessageStream streamMappings;
+    for (DXInstructionAssociation association : debugModule->GetInstructionAssociations(static_cast<uint16_t>(message.fileUID), message.line)) {
+        DXCodeOffsetTraceback traceback = shader->module->GetCodeOffsetTraceback(association.codeOffset);
+        if (traceback.functionID == IL::InvalidID) {
+            continue;
+        }
+
+        // Append to set
+        auto* status = MessageStreamView<ShaderInstructionMappingMessage>(streamMappings).Add();
+        status->basicBlockId = traceback.basicBlockID;
+        status->instructionIndex = traceback.instructionIndex;
+        status->codeOffset = association.codeOffset;
+    }
+
+    // Report all mappings
+    auto&& response = view.Add<ShaderInstructionMappingSetMessage>(ShaderInstructionMappingSetMessage::AllocationInfo { .mappingsByteSize = streamMappings.GetByteSize() });
+    response->shaderGUID = message.shaderGUID;
+    response->fileUID = message.fileUID;
+    response->line = message.line;
+    response->found = true;
+    response->mappings.Set(streamMappings);
+}
+
+void MetadataController::OnMessage(const struct GetShaderSourceInstructionMappingMessage &message) {
+    MessageStreamView view(stream);
+
+    // Attempt to find shader with given UID
+    ShaderState* shader = device->states_Shaders.GetFromUID(message.shaderGUID);
+
+    // Module initialization
+    if (shader) {
+        InitializeModule(shader);
+    }
+
+    // Failed?
+    if (!shader || !shader->module) {
+        auto&& response = view.Add<ShaderSourceInstructionMappingMessage>();
+        response->shaderGUID = message.shaderGUID;
+        response->basicBlockId = message.basicBlockId;
+        response->instructionIndex = message.instructionIndex;
+        response->codeOffset = message.codeOffset;
+        response->found = false;
+        return;
+    }
+
+    // Get debug module
+    IDXDebugModule* debugModule = shader->module->GetDebug();
+
+    // Standard response
+    auto&& response = view.Add<ShaderSourceInstructionMappingMessage>();
+    response->shaderGUID = message.shaderGUID;
+    response->basicBlockId = message.basicBlockId;
+    response->instructionIndex = message.instructionIndex;
+    response->codeOffset = message.codeOffset;
+    response->found = false;
+    
+    // No sources available?
+    if (!debugModule) {
+        return;
+    }
+
+    // Get the program, always valid
+    IL::Program *program = shader->module->GetProgram();
+
+    // Get the traceback
+    DXCodeOffsetTraceback traceback = shader->module->GetCodeOffsetTraceback(message.codeOffset);
+    if (traceback.functionID == IL::InvalidID) {
+        return;
+    }
+
+    // Try to get the function
+    IL::Function *fn = program->GetFunctionList().GetFunction(traceback.functionID);
+    if (!fn) {
+        return;
+    }
+
+    // Get the association
+    DXSourceAssociation association = debugModule->GetSourceAssociation(fn, message.codeOffset);
+    if (association.fileUID == UINT16_MAX) {
+        return;
+    }
+
+    // Compose message
+    response->found = true;
+    response->fileUID = association.fileUID;
+    response->line = association.line;
+}
+
+void MetadataController::WorkerDeferredInitializeModule(void *userData) {
+    auto* jobData = static_cast<DeferredJobData*>(userData);
+    shaderCompiler->InitializeModule(jobData->shader);
+
+    // Post is sync now
+    jobData->message.deferred = false;
+
+    // Mark as completed
+    std::lock_guard guard(jobMutex);
+    completedJobs.push_back(jobData);
+}
+
 void MetadataController::Commit() {
     std::lock_guard guard(mutex);
+
+    // Handle all async jobs
+    {
+        std::lock_guard jobGuard(jobMutex);
+
+        // Process messages out of order, and release ref
+        for (DeferredJobData* job : completedJobs) {
+            OnMessage(job->message);
+            destroyRef(job->shader, allocators);
+            destroy(job, registry->GetAllocators());
+        }
+
+        jobCount -= static_cast<uint32_t>(completedJobs.size());
+        completedJobs.clear();
+    }
+
+    // Any job change since last?
+    if (uint32_t count = jobCount.load(std::memory_order::relaxed); lastPooledCount != count) {
+        auto message = MessageStreamView(stream).Add<IndexingJobDiagnosticMessage>();
+        message->remaining = count;
+        lastPooledCount = count;
+    }
 
     // Export general to bridge
     bridge->GetOutput()->AddStreamAndSwap(stream);
     bridge->GetOutput()->AddStreamAndSwap(segmentMappingStream);
+}
+
+void MetadataController::CreateShader(ShaderState *state) {
+    if (useShaderExternalReference) {
+        state->hasExternalReference = true;
+        state->AddUser();
+    }
 }

@@ -163,6 +163,58 @@ bool DiscoveryService::UninstallGlobal() {
     return !anyFailed;
 }
 
+bool DiscoveryService::InstallLocal(const DiscoveryProcessLocalInfo& localInfo, const MessageStream& environment) {
+    bool anyFailed = false;
+
+    // For now, enable all capture modes by default
+#ifdef _WIN32
+    // Write the startup environment
+    if (environment.GetByteSize()) {
+        _putenv_s(Backend::kStartupEnvironmentKey, Backend::StartupEnvironment{}.WriteEnvironment(environment).c_str());
+    }
+    
+    // Write token if valid
+    if (localInfo.reservedToken.IsValid()) {
+        _putenv_s(Backend::kReservedEnvironmentTokenKey, localInfo.reservedToken.ToString().c_str());
+    }
+    
+    // All processes?
+    if (localInfo.captureChildProcesses) {
+        _putenv_s(Backend::kCaptureChildProcessesKey, "");
+    }
+
+    // All devices?
+    if (localInfo.attachAllDevices) {
+        _putenv_s(Backend::kAttachAllDevicesKey, "");
+    }
+
+    // Suspended initialization?
+    if (localInfo.suspendDeferredInitialization) {
+        _putenv_s(Backend::kSuspendDeferredInitializationKey, "");
+    }
+
+    // Wait for debugger?
+    if (localInfo.waitForDebugger) {
+        _putenv_s(Backend::kWaitForDebugger, "");
+    }
+
+    // Disable service traps, must always bootstrap regardless of discoverability
+    _putenv_s(Backend::kNoServiceTrapKey, "");
+#else // _WIN32
+#   error Not implemented
+#endif // _WIN32
+
+    // Install all
+    for (const ComRef<IDiscoveryListener>& listener : listeners) {
+        if (!listener->InstallLocal()) {
+            anyFailed = true;
+        }
+    }
+
+    // OK
+    return !anyFailed;
+}
+
 bool DiscoveryService::HasConflictingInstances() {
     bool anyBad = false;
 
@@ -190,6 +242,27 @@ bool DiscoveryService::UninstallConflictingInstances() {
     // OK
     return !anyFailed;
 }
+
+#ifdef _WIN32
+static bool BindProcessLifetimes(HANDLE process) {
+    // Open a job object
+    // Yes, we're leaking this
+    HANDLE jpb = CreateJobObjectA(nullptr, nullptr);
+    if (!jpb) {
+        return false;
+    }
+
+    // On cleanup, close the process too
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit = {};
+    limit.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(jpb, JobObjectExtendedLimitInformation, &limit, sizeof(limit))) {
+        return false;
+    }
+
+    // Finally, assign it
+    return AssignProcessToJobObject(jpb, process);
+}
+#endif // _WIN32
 
 bool DiscoveryService::StartBootstrappedProcess(const DiscoveryProcessCreateInfo &createInfo, const MessageStream& environment, DiscoveryProcessInfo& info) {
     DiscoveryBootstrappingEnvironment bootstrappingEnvironment;
@@ -219,6 +292,16 @@ bool DiscoveryService::StartBootstrappedProcess(const DiscoveryProcessCreateInfo
         bootstrappingEnvironment.environmentKeys.emplace_back(Backend::kAttachAllDevicesKey, "");
     }
 
+    // Suspended initialization?
+    if (createInfo.suspendDeferredInitialization) {
+        bootstrappingEnvironment.environmentKeys.emplace_back(Backend::kSuspendDeferredInitializationKey, "");
+    }
+
+    // Wait for debugger?
+    if (createInfo.waitForDebugger) {
+        bootstrappingEnvironment.environmentKeys.emplace_back(Backend::kWaitForDebugger, "");
+    }
+
     // Disable service traps, must always bootstrap regardless of discoverability
     bootstrappingEnvironment.environmentKeys.emplace_back(Backend::kNoServiceTrapKey, "");
     
@@ -228,12 +311,41 @@ bool DiscoveryService::StartBootstrappedProcess(const DiscoveryProcessCreateInfo
     }
     
 #ifdef _WIN32
+    // Default suspended
+    uint32_t processFlags = DETACHED_PROCESS | CREATE_SUSPENDED;
+
     // Startup info
     STARTUPINFO startupInfo;
     ZeroMemory(&startupInfo, sizeof(startupInfo));
     startupInfo.cb = sizeof(startupInfo);
     startupInfo.dwFlags = STARTF_USESHOWWINDOW;
     startupInfo.wShowWindow = SW_SHOW;
+
+    // Requested redirection?
+    if (createInfo.redirectPipes) {
+        // Pipe attributes
+        SECURITY_ATTRIBUTES pipeSA{};
+        ZeroMemory(&pipeSA, sizeof(pipeSA));
+        pipeSA.nLength = sizeof(SECURITY_ATTRIBUTES);
+        pipeSA.bInheritHandle = true;
+        pipeSA.lpSecurityDescriptor = nullptr;
+
+        // Create pipes
+        HANDLE readPipe = nullptr, writePipe = nullptr;
+        if (!CreatePipe(&readPipe, &writePipe, &pipeSA, 0)) {
+            return false;
+        }
+
+        // Share output/err
+        startupInfo.dwFlags   |= STARTF_USESTDHANDLES;
+        startupInfo.hStdOutput = writePipe;
+        startupInfo.hStdError  = writePipe;
+        startupInfo.hStdInput  = readPipe;
+
+        // Report pipes to caller
+        info.readPipe = reinterpret_cast<uint64_t>(readPipe);
+        info.writePipe = reinterpret_cast<uint64_t>(writePipe);
+    }
     
     // Process info
     PROCESS_INFORMATION processInfo;
@@ -269,14 +381,19 @@ bool DiscoveryService::StartBootstrappedProcess(const DiscoveryProcessCreateInfo
         argumentStream.str().data(),
         0x0,
         0x0,
-        false,
-        DETACHED_PROCESS | CREATE_SUSPENDED,
+        createInfo.redirectPipes,
+        processFlags,
         environmentBlock.data(),
         createInfo.workingDirectoryPath,
         &startupInfo, &processInfo,
         static_cast<uint32_t>(dllKeys.size()), dllKeys.data(), nullptr
     )) {
         return false;
+    }
+
+    // Bind if requested, not fatal if failed
+    if (createInfo.closeProcessOnExit) {
+        BindProcessLifetimes(processInfo.hProcess);
     }
 
     // Set process info

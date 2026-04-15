@@ -28,18 +28,27 @@
 #include <Backends/DX12/Compiler/DXIL/LLVM/LLVMHeader.h>
 #include <Backends/DX12/Compiler/DXIL/LLVM/LLVMRecordStringView.h>
 #include <Backends/DX12/Compiler/DXBC/Blocks/DXBCPhysicalBlockShaderSourceInfo.h>
+#include <Backends/DX12/Compiler/DXIL/DXILModule.h>
+
+// Backend
+#include <Backend/IL/Function.h>
 
 // Common
 #include <Common/FileSystem.h>
 
-DXILDebugModule::DXILDebugModule(const Allocators &allocators, const DXBCPhysicalBlockShaderSourceInfo& shaderSourceInfo)
+DXILDebugModule::DXILDebugModule(const Allocators &allocators, DXILModule* module, const DXBCPhysicalBlockShaderSourceInfo &shaderSourceInfo)
     : scan(allocators),
       sourceFragments(allocators),
-      instructionMetadata(allocators),
-      metadata(allocators),
+      functionMetadata(allocators),
+      unresolvedDwarfValues(allocators),
+      valueStrings(allocators.Tag(kAllocModuleDXILSymbols)),
+      valueAllocations(allocators.Tag(kAllocModuleDXILSymbols)),
+      thinMetadata(allocators),
       thinTypes(allocators),
       thinValues(allocators),
+      thinFunctions(allocators),
       allocators(allocators),
+      module(module),
       shaderSourceInfo(shaderSourceInfo) { }
 
 static std::string SanitizeCompilerPath(const std::string_view& view) {
@@ -54,12 +63,72 @@ static std::string SanitizeCompilerPath(const std::string_view& view) {
     return path;
 }
 
-DXSourceAssociation DXILDebugModule::GetSourceAssociation(uint32_t codeOffset) {
-    if (codeOffset >= instructionMetadata.size()) {
+DXSourceAssociation DXILDebugModule::GetSourceAssociation(const IL::Function* function, uint32_t codeOffset) {
+    DXILPhysicalBlockTable& table = module->GetTable();
+
+    // Get the linked index
+    uint32_t index = table.function.GetNonPrototypeFunctionIndex(function->GetID());
+
+    FunctionMetadata& md = functionMetadata[index];
+    if (codeOffset >= md.instructionMetadata.size()) {
         return {};
     }
 
-    return instructionMetadata[codeOffset].sourceAssociation;
+    return md.instructionMetadata[codeOffset].sourceAssociation;
+}
+
+std::span<DXInstructionAssociation> DXILDebugModule::GetInstructionAssociations(uint16_t fileUID, uint32_t line) {
+    // Find all associations
+    auto it = instructionAssociations.find(DXSourceAssociation{
+        .fileUID = fileUID,
+        .line = line
+    }.GetKey());
+
+    // May not exist
+    if (it == instructionAssociations.end()) {
+        return {};
+    }
+
+    // Get view
+    return std::span(it->second.set.data(), it->second.set.size());
+}
+
+DXDwarfInfo DXILDebugModule::GetDwarfInfo(Backend::IL::TypeMap& typeMap, const IL::Function *function, uint32_t codeOffset) {
+    DXILPhysicalBlockTable& table = module->GetTable();
+
+    // Get the linked index
+    uint32_t index = table.function.GetNonPrototypeFunctionIndex(function->GetID());
+
+    // Get function
+    FunctionMetadata& md = functionMetadata[index];
+    if (codeOffset >= md.instructionMetadata.size()) {
+        return {};
+    }
+
+    // May not have any debug info
+    auto it = md.instructionDwarfInfos.find(codeOffset);
+    if (it == md.instructionDwarfInfos.end()) {
+        return {};
+    }
+
+    // Copy over info
+    DXDwarfInfo info;
+    for (const InstructionDwarfVariable& sourceVar : it->second.variables) {
+        DXDwarfVariableValue& variable = info.variables.emplace_back();
+        variable.name = sourceVar.name;
+        variable.type = GetTypeFromDwarf(typeMap, sourceVar.typeMdId - 1);
+        variable.variableId = sourceVar.variableMdId;
+
+        for (const InstructionDwarfValue* sourceValue : sourceVar.values) {
+            DXDwarfValue &value = variable.values.emplace_back();
+            value.kind = sourceValue->kind;
+            value.code = sourceValue->code;
+            value.bitWise.bitStart = sourceValue->bitWise.bitStart;
+            value.bitWise.bitLength = sourceValue->bitWise.bitLength;
+        } 
+    }
+    
+    return info;
 }
 
 std::string_view DXILDebugModule::GetLine(uint32_t fileUID, uint32_t line) {
@@ -145,6 +214,9 @@ bool DXILDebugModule::Parse(const void *byteCode, uint64_t byteLength) {
             case LLVMReservedBlock::Metadata:
                 ParseMetadata(block);
                 break;
+            case LLVMReservedBlock::ValueSymTab:
+                ParseSymTab(block);
+                break;
         }
     }
 
@@ -158,45 +230,83 @@ bool DXILDebugModule::Parse(const void *byteCode, uint64_t byteLength) {
         RemapLineScopes();
     }
 
+    // Populate reverse lookup
+    CreateReverseAssociations();
+
     // OK
     return true;
 }
 
 void DXILDebugModule::RemapLineScopes() {
-    for (InstructionMetadata& md : instructionMetadata) {
-        // Unmapped or invalid?
-        if (md.sourceAssociation.fileUID == UINT16_MAX ||
-            md.sourceAssociation.fileUID >= sourceFragments.size()) {
-            continue;
-        }
-
-        // The parent fragment
-        SourceFragment& targetFragment = sourceFragments.at(md.sourceAssociation.fileUID);
-
-        // Current directive
-        SourceFragmentDirective candidateDirective;
-
-        // Check all preprocessed fragments
-        for (const SourceFragmentDirective& directive : targetFragment.preprocessedDirectives) {
-            if (directive.directiveLineOffset > md.sourceAssociation.line) {
-                break;
+    for (FunctionMetadata& functionMd : functionMetadata) {
+        for (InstructionMetadata& md : functionMd.instructionMetadata) {
+            // Unmapped or invalid?
+            if (md.sourceAssociation.fileUID == UINT16_MAX ||
+                md.sourceAssociation.fileUID >= sourceFragments.size()) {
+                continue;
             }
 
-            // Consider candidate
-            candidateDirective = directive;
+            // The parent fragment
+            SourceFragment& targetFragment = sourceFragments.at(md.sourceAssociation.fileUID);
+
+            // Current directive
+            SourceFragmentDirective candidateDirective;
+
+            // Check all preprocessed fragments
+            for (const SourceFragmentDirective& directive : targetFragment.preprocessedDirectives) {
+                if (directive.directiveLineOffset > md.sourceAssociation.line) {
+                    break;
+                }
+
+                // Consider candidate
+                candidateDirective = directive;
+            }
+
+            // No match? (Part of the primary fragment)
+            if (candidateDirective.fileUID == UINT16_MAX) {
+                continue;
+            }
+
+            // Offset within the directive file
+            const uint32_t intraDirectiveOffset = md.sourceAssociation.line - candidateDirective.directiveLineOffset;
+
+            // Remap the association
+            md.sourceAssociation.fileUID = candidateDirective.fileUID;
+            md.sourceAssociation.line = candidateDirective.fileLineOffset + intraDirectiveOffset; 
         }
+    }
+}
 
-        // No match? (Part of the primary fragment)
-        if (candidateDirective.fileUID == UINT16_MAX) {
-            continue;
+void DXILDebugModule::CreateReverseAssociations() {
+    DXILPhysicalBlockTable& table = module->GetTable();
+    
+    for (uint64_t linkIndex = 0; linkIndex < functionMetadata.size(); linkIndex++) {
+        FunctionMetadata& functionMd = functionMetadata[linkIndex];
+
+        // Get the declaration
+        const DXILFunctionDeclaration *functionDeclaration = table.function.GetFunctionDeclarationFromIndex(static_cast<uint32_t>(linkIndex));
+
+        // Create key -> record lookups
+        for (uint64_t recordIndex = 0; recordIndex < functionMd.instructionMetadata.size(); recordIndex++) {
+            InstructionMetadata& md = functionMd.instructionMetadata[recordIndex];
+            
+            // Unmapped or invalid?
+            if (md.sourceAssociation.fileUID == UINT16_MAX || md.sourceAssociation.fileUID >= sourceFragments.size()) {
+                continue;
+            }
+
+            // Get the set
+            InstructionAssociationSet &instructionSet = instructionAssociations[DXSourceAssociation{
+                .fileUID = md.sourceAssociation.fileUID,
+                .line = md.sourceAssociation.line
+            }.GetKey()];
+
+            // Add to set
+            instructionSet.set.push_back(DXInstructionAssociation {
+                .functionId = functionDeclaration->functionId,
+                .codeOffset = static_cast<uint32_t>(recordIndex)
+            });
         }
-
-        // Offset within the directive file
-        const uint32_t intraDirectiveOffset = md.sourceAssociation.line - candidateDirective.directiveLineOffset;
-
-        // Remap the association
-        md.sourceAssociation.fileUID = candidateDirective.fileUID;
-        md.sourceAssociation.line = candidateDirective.fileLineOffset + intraDirectiveOffset; 
     }
 }
 
@@ -229,10 +339,41 @@ void DXILDebugModule::ParseTypes(LLVMBlock *block) {
                 // Void return type?
                 type.function.isVoidReturn = thinTypes.at(record.Op(1)).type == LLVMTypeRecord::Void;
 
+                // Number of parameters
+                type.function.parameterCount = record.opCount - 2;
+
+                // Allocate types
+                type.function.parameterTypes = blockAllocator.AllocateArray<uint32_t>(type.function.parameterCount);
+
                 // Inherit non-semantic from parameters
                 for (uint32_t i = 2; i < record.opCount; i++) {
+                    type.function.parameterTypes[i - 2] = static_cast<uint32_t>(record.Op(i));
                     type.bIsNonSemantic |= thinTypes.at(record.Op(i)).bIsNonSemantic;
                 }
+                break;
+            }
+            case LLVMTypeRecord::Integer: {
+                type.integral.bitWidth = record.Op32(0);
+                break;
+            }
+            case LLVMTypeRecord::Half: {
+                type.integral.bitWidth = 16;
+                break;
+            }
+            case LLVMTypeRecord::Float: {
+                type.integral.bitWidth = 32;
+                break;
+            }
+            case LLVMTypeRecord::Double: {
+                type.integral.bitWidth = 64;
+                break;
+            }
+            case LLVMTypeRecord::Vector: {
+                type.aggregate.contained = record.Op32(1);
+                break;
+            }
+            case LLVMTypeRecord::Array: {
+                type.aggregate.contained = record.Op32(1);
                 break;
             }
         }
@@ -246,13 +387,33 @@ void DXILDebugModule::ParseModuleFunction(const LLVMRecord& record) {
     // Set type
     value.thinType = record.Op32(0);
 
+    // Prototype?
+    if (!record.Op32(2)) {
+        thinFunctions.push_back(ThinFunction {
+            .thinType = value.thinType
+        });
+    }
+
     // Inherit non-semantic from type
     value.bIsNonSemantic |= thinTypes.at(value.thinType).bIsNonSemantic;
 }
 
 void DXILDebugModule::ParseFunction(LLVMBlock *block) {
-    // Keep current head
+    // Keep current heads
     const size_t valueHead = thinValues.size();
+    const size_t metadataHead = thinMetadata.size();
+
+    // Get type, appears in linkage order
+    const ThinFunction& function = thinFunctions[functionLinkIndex++];
+
+    // Create new metadata entry
+    FunctionMetadata& functionMd = functionMetadata.emplace_back();
+
+    // Create value per parameter
+    for (uint32_t i = 0; i < thinTypes[function.thinType].function.parameterCount; i++) {
+        ThinValue& value = thinValues.emplace_back();
+        value.kind = ThinValueKind::Parameter;
+    }
     
     for(LLVMBlock* child : block->blocks) {
         switch (child->As<LLVMReservedBlock>()) {
@@ -260,6 +421,7 @@ void DXILDebugModule::ParseFunction(LLVMBlock *block) {
                 ASSERT(false, "Invalid block");
                 break;
             case LLVMReservedBlock::ValueSymTab:
+                ParseSymTab(child);
                 break;
             case LLVMReservedBlock::UseList:
                 break;
@@ -275,15 +437,16 @@ void DXILDebugModule::ParseFunction(LLVMBlock *block) {
     }
 
     // Pending metadata
-    InstructionMetadata metadata;
+    InstructionMetadata instrMetadata;
 
-    for (const LLVMBlockElement& element : block->elements) {
-        if (!element.Is(LLVMBlockElementType::Record)) {
-            continue;
-        }
+    /// Was the last instruction semantically relevant?
+    bool isSemanticInstruction = false;
 
-        // Get record
-        const LLVMRecord& record = block->records[element.id];
+    /// Current source record offset, not debug
+    uint32_t recordOffset = 0;
+
+    for (uint32_t recordIdx = 0; recordIdx < static_cast<uint32_t>(block->records.size()); recordIdx++) {
+        LLVMRecord &record = block->records[recordIdx];
 
         // Current anchor
         uint32_t anchor = static_cast<uint32_t>(thinValues.size());
@@ -293,104 +456,171 @@ void DXILDebugModule::ParseFunction(LLVMBlock *block) {
             default: {
                 // Result value?
                 if (HasValueAllocation(record.As<LLVMFunctionRecord>(), record.opCount)) {
-                    thinValues.emplace_back();
+                    ThinValue& value = thinValues.emplace_back();
+                    value.kind = ThinValueKind::Instruction;
+                    value.recordOffset = recordOffset;
                 }
 
                 // Add metadata and consume
-                instructionMetadata.emplace_back();
+                functionMd.instructionMetadata.emplace_back();
+
+                // Always semantically relevant
+                isSemanticInstruction = true;
+
+                // Always in source
+                recordOffset++;
                 break;
             }
 
             case LLVMFunctionRecord::InstCall:
             case LLVMFunctionRecord::InstCall2: {
-                const ThinValue& called = thinValues.at(anchor - record.Op(3));
+                uint32_t functionValueIndex = anchor - static_cast<uint32_t>(record.Op(3));
+                
+                ThinValue called = thinValues.at(functionValueIndex);
                 ASSERT(called.kind == ThinValueKind::Function, "Mismatched thin type");
-
+                
                 // Ignore non-semantic instructions from cross-referencing
-                if (!called.bIsNonSemantic) {
-                    instructionMetadata.emplace_back();
+                if (called.bIsNonSemantic) {
+                    ASSERT(thinTypes[called.thinType].function.isVoidReturn, "Unexpected function");
+                    ParseDebugCall(functionMd, record, anchor, functionValueIndex);
+                    isSemanticInstruction = false;
+                } else {
+                    functionMd.instructionMetadata.emplace_back();
+
+                    // Always semantically relevant
+                    isSemanticInstruction = true;
                 }
                 
                 // Allocate return value if need be
                 if (!thinTypes[called.thinType].function.isVoidReturn) {
-                    thinValues.emplace_back();
+                    ThinValue& value = thinValues.emplace_back();
+                    value.kind = ThinValueKind::Instruction;
+                    value.recordOffset = recordOffset;
+                }
+
+                // Increment source record on semantic
+                if (!called.bIsNonSemantic) {
+                    recordOffset++;
                 }
                 break;
             }
 
             case LLVMFunctionRecord::DebugLOC:
             case LLVMFunctionRecord::DebugLOC2: {
-                metadata.sourceAssociation.fileUID = 0;
-                metadata.sourceAssociation.line = record.OpAs<uint32_t>(0) - 1;
-                metadata.sourceAssociation.column = record.OpAs<uint32_t>(1) - 1;
+                instrMetadata.sourceAssociation.fileUID = 0;
+                instrMetadata.sourceAssociation.line = record.OpAs<uint32_t>(0) - 1;
+                instrMetadata.sourceAssociation.column = record.OpAs<uint32_t>(1) - 1;
 
                 // Has scope?
                 if (uint32_t scope = record.OpAs<uint32_t>(2); scope) {
-                    metadata.sourceAssociation.fileUID = static_cast<uint16_t>(GetLinearFileUID(scope - 1));
+                    instrMetadata.sourceAssociation.fileUID = static_cast<uint16_t>(GetLinearFileUID(scope - 1));
                 }
 
-                if (instructionMetadata.size()) {
-                    instructionMetadata.back() = metadata;
+                if (isSemanticInstruction && functionMd.instructionMetadata.size()) {
+                    functionMd.instructionMetadata.back() = instrMetadata;
                 }
                 break;
             }
 
             case LLVMFunctionRecord::DebugLOCAgain: {
                 // Repush pending
-                if (instructionMetadata.size()) {
-                    instructionMetadata.back() = metadata;
+                if (isSemanticInstruction && functionMd.instructionMetadata.size()) {
+                    functionMd.instructionMetadata.back() = instrMetadata;
                 }
                 break;
             }
         }
     }
 
-    // Reset head, value indices reset after function blocks
+    // Resolve all pending values
+    for (InstructionDwarfValue *value : unresolvedDwarfValues) {
+        ResolveDwarfValue(value);
+    }
+
+    // Cleanup
+    unresolvedDwarfValues.clear();
+
+    // Reset heads, value indices reset after function blocks
     thinValues.resize(valueHead);
+    thinMetadata.resize(metadataHead);
 }
 
 void DXILDebugModule::ParseConstants(LLVMBlock *block) {
+    uint32_t type = IL::InvalidID;
+    
     for (LLVMRecord &record: block->records) {
         if (record.Is(LLVMConstantRecord::SetType)) {
+            type = record.Op32(0);
             continue;
         }
 
-        thinValues.emplace_back();
+        // Constants are resolved on demand
+        ThinValue &value = thinValues.emplace_back();
+        value.kind = ThinValueKind::Constant;
+        value.thinType = type;
+        value.record = &record;
     }
 }
 
 void DXILDebugModule::ParseMetadata(LLVMBlock *block) {
-    // Current name
-    LLVMRecordStringView recordName;
-
     // Value anchor
-    uint32_t anchor = static_cast<uint32_t>(metadata.size());
+    uint32_t anchor = static_cast<uint32_t>(thinMetadata.size());
 
     // Preallocate
-    metadata.resize(metadata.size() + block->records.size());
+    thinMetadata.reserve(thinMetadata.size() + block->records.size());
 
     // Visit records
     for (size_t i = 0; i < block->records.size(); i++) {
         const LLVMRecord &record = block->records[i];
 
-        // Setup md
-        Metadata& md = metadata[anchor + i];
-        md.type = static_cast<LLVMMetadataRecord>(record.id);
-
-        // Handle record
-        switch (md.type) {
+        switch (static_cast<LLVMMetadataRecord>(record.id)) {
             default: {
-                // Ignored
                 break;
+            }
+
+            case LLVMMetadataRecord::Kind: {
+                // No value addition
+                continue;
             }
 
             case LLVMMetadataRecord::Name: {
                 // Set name
-                recordName = LLVMRecordStringView(record, 0);
+                LLVMRecordStringView recordName = LLVMRecordStringView(record, 0);
 
                 // Validate next
                 ASSERT(i + 1 != block->records.size(), "Expected succeeding metadata record");
                 ASSERT(block->records[i + 1].Is(LLVMMetadataRecord::NamedNode), "Succeeding record to Name must be NamedNode");
+
+                ParseNamedMetadata(block, anchor, block->records[++i], recordName);
+                continue;
+            }
+        }
+
+        // Setup md
+        Metadata& md = thinMetadata.emplace_back();
+        md.type = static_cast<LLVMMetadataRecord>(record.id);
+        md.record = &record;
+
+        // Handle record
+        switch (md.type) {
+            default: {
+                ASSERT(false, "Unhandled type");
+                break;
+            }
+
+            case LLVMMetadataRecord::Node:
+            case LLVMMetadataRecord::OldFnNode:
+            case LLVMMetadataRecord::OldNode:
+            case LLVMMetadataRecord::DistinctNode:
+            case LLVMMetadataRecord::Location:
+            case LLVMMetadataRecord::GenericDebug:
+            case LLVMMetadataRecord::Enumerator: 
+            case LLVMMetadataRecord::SubroutineType: 
+            case LLVMMetadataRecord::Module: 
+            case LLVMMetadataRecord::GlobalVar: 
+            case LLVMMetadataRecord::ObjProperty: 
+            case LLVMMetadataRecord::ImportedEntity: 
+            case LLVMMetadataRecord::StringOld: {
                 break;
             }
 
@@ -419,6 +649,128 @@ void DXILDebugModule::ParseMetadata(LLVMBlock *block) {
                 break;
             }
 
+            case LLVMMetadataRecord::Value: {
+                md.value = static_cast<uint32_t>(record.Op(1));
+                break;
+            }
+
+            case LLVMMetadataRecord::LocalVar: {
+                md.localVar.op = static_cast<LLVMDwarfOpKind>(record.Op(1));
+                md.localVar.mdTypeId = static_cast<uint32_t>(record.Op(6));
+                md.localVar.nameMdId = static_cast<uint32_t>(record.Op(3));
+                break;
+            }
+
+            case LLVMMetadataRecord::Expression: {
+                if (record.opCount > 1) {
+                    md.expression.op = static_cast<LLVMDwarfOpKind>(record.Op(1));
+                
+                    switch (md.expression.op) {
+                        default: {
+                            break;
+                        }
+                        case LLVMDwarfOpKind::BitPiece: {
+                            md.expression.bitPiece.bitStart = static_cast<uint32_t>(record.Op(2));
+                            md.expression.bitPiece.bitLength = static_cast<uint32_t>(record.Op(3));
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+
+            case LLVMMetadataRecord::DerivedType: {
+                if (record.opCount > 1) {
+                    md.derivedType.tag = static_cast<LLVMDwarfTag>(record.Op(1));
+
+                    switch (md.derivedType.tag) {
+                        default: {
+                            break;
+                        }
+                        case LLVMDwarfTag::Typedef: {
+                            md.derivedType._typedef.nameMdId = static_cast<uint32_t>(record.Op(2));
+                            md.derivedType._typedef.baseTypeMdId = static_cast<uint32_t>(record.Op(6));
+                            break;
+                        }
+                        case LLVMDwarfTag::Member: {
+                            md.derivedType.member.nameMdId = static_cast<uint32_t>(record.Op(2));
+                            md.derivedType.member.baseTypeMdId = static_cast<uint32_t>(record.Op(6));
+                            md.derivedType.member.size = static_cast<uint32_t>(record.Op(7));
+                            md.derivedType.member.align = static_cast<uint32_t>(record.Op(8));
+                            md.derivedType.member.offset = static_cast<uint32_t>(record.Op(9));
+                            break;
+                        }
+                        case LLVMDwarfTag::Const: {
+                            md.derivedType._const.baseTypeMdId = static_cast<uint32_t>(record.Op(6));
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+
+            case LLVMMetadataRecord::CompositeType: {
+                if (record.opCount > 1) {
+                    md.compositeType.tag = static_cast<LLVMDwarfTag>(record.Op(1));
+
+                    switch (md.compositeType.tag) {
+                        default: {
+                            break;
+                        }
+                        case LLVMDwarfTag::ClassType: {
+                            md.compositeType._class.nameMdId = static_cast<uint32_t>(record.Op(2));
+                            md.compositeType._class.size = static_cast<uint32_t>(record.Op(7));
+                            md.compositeType._class.align = static_cast<uint32_t>(record.Op(8));
+                            md.compositeType._class.elementsMdId = static_cast<uint32_t>(record.Op(11));
+                            md.compositeType._class.templateParamsMdId = static_cast<uint32_t>(record.Op(14));
+                            break;
+                        }
+                        case LLVMDwarfTag::StructureType: {
+                            md.compositeType.structureType.nameMdId = static_cast<uint32_t>(record.Op(2));
+                            md.compositeType.structureType.size = static_cast<uint32_t>(record.Op(7));
+                            md.compositeType.structureType.align = static_cast<uint32_t>(record.Op(8));
+                            md.compositeType.structureType.elementsMdId = static_cast<uint32_t>(record.Op(11));
+                            break;
+                        }
+                        case LLVMDwarfTag::Array: {
+                            md.compositeType.arrayType.baseTypeMdId = static_cast<uint32_t>(record.Op(6));
+                            md.compositeType.arrayType.size = static_cast<uint32_t>(record.Op(7));
+                            md.compositeType.arrayType.align = static_cast<uint32_t>(record.Op(8));
+                            md.compositeType.arrayType.elementsMdId = static_cast<uint32_t>(record.Op(11));
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+                
+            case LLVMMetadataRecord::SubRange: {
+                md.subRange.count = static_cast<uint32_t>(record.Op(1));
+                md.subRange.lowerBound = static_cast<uint32_t>(record.Op(2));
+                break;
+            }
+
+            case LLVMMetadataRecord::TemplateType: {
+                md.templateType.nameMdId = static_cast<uint32_t>(record.Op(1));
+                md.templateType.typeMdId = static_cast<uint32_t>(record.Op(2));
+                break;
+            }
+
+            case LLVMMetadataRecord::TemplateValue: {
+                md.templateValue.nameMdId = static_cast<uint32_t>(record.Op(2));
+                md.templateValue.typeMdId = static_cast<uint32_t>(record.Op(3));
+                md.templateValue.valueMdId = static_cast<uint32_t>(record.Op(4));
+                break;
+            }
+
+            case LLVMMetadataRecord::BasicType: {
+                md.basicType.nameMdId = static_cast<uint32_t>(record.Op(2));
+                md.basicType.size = static_cast<uint32_t>(record.Op(3));
+                md.basicType.align = static_cast<uint32_t>(record.Op(4));
+                md.basicType.encoding = static_cast<LLVMDwarfTypeEncoding>(record.Op(5));
+                break;
+            }
+
             case LLVMMetadataRecord::File: {
                 md.file.linearFileUID = static_cast<uint32_t>(sourceFragments.size());
 
@@ -434,9 +786,43 @@ void DXILDebugModule::ParseMetadata(LLVMBlock *block) {
                 fragment.filename = SanitizeCompilerPath(fragment.filename);
                 break;
             }
+        }
+    }
+}
 
-            case LLVMMetadataRecord::NamedNode: {
-                ParseNamedMetadata(block, anchor, record, recordName);
+void DXILDebugModule::ParseSymTab(LLVMBlock *block) {
+    for (const LLVMRecord &record: block->records) {
+        switch (static_cast<LLVMSymTabRecord>(record.id)) {
+            default: {
+                break;
+            }
+            case LLVMSymTabRecord::Entry: {
+                /*
+                 * LLVM Specification
+                 *   VST_ENTRY: [valueid, namechar x N]
+                 */
+
+                // May not be mapped
+                if (uint32_t value = record.Op32(0)) {
+                    // Grow to capacity
+                    if (valueStrings.size() <= value) {
+                        valueStrings.resize(value + 1);
+                        valueAllocations.resize(value + 1);
+                    }
+
+                    // Insert from operand 1
+                    valueStrings[value] = LLVMRecordStringView(record, 1);
+
+                    // Debugging experience
+#ifndef NDEBUG
+                    char buffer[256];
+                    if (record.opCount < 256) {
+                        record.FillOperands(buffer, 1);
+                    }
+
+                    GetValueAllocation(value);
+#endif // NDEBUG
+                }
                 break;
             }
         }
@@ -461,7 +847,7 @@ void DXILDebugModule::ParseNamedMetadata(LLVMBlock* block, uint32_t anchor, cons
 
             // Parse all files
             for (uint32_t i = 0; i < record.opCount; i++) {
-                ParseContents(block, static_cast<uint32_t>(record.Op(i)));
+                ParseContentsRecord(block, static_cast<uint32_t>(record.Op(i)));
             }
             break;
         }
@@ -475,13 +861,8 @@ void DXILDebugModule::ParseNamedMetadata(LLVMBlock* block, uint32_t anchor, cons
     }
 }
 
-void DXILDebugModule::ParseContents(LLVMBlock* block, uint32_t fileMdId) {
-    const LLVMRecord& record = block->records[fileMdId];
-
-    // Get strings
-    LLVMRecordStringView filename(block->records[record.Op(0) - 1], 0);
-    LLVMRecordStringView contents(block->records[record.Op(1) - 1], 0);
-
+template<typename T>
+void DXILDebugModule::ParseContentsAdapter(const T &filename, const T &contents) {
     // Target fragment which may be derived
     SourceFragment* fragment = FindOrCreateSourceFragmentSanitized(filename);
 
@@ -633,6 +1014,15 @@ void DXILDebugModule::ParseContents(LLVMBlock* block, uint32_t fileMdId) {
     }
 }
 
+void DXILDebugModule::ParseContentsRecord(LLVMBlock* block, uint32_t fileMdId) {
+    const LLVMRecord& record = block->records[fileMdId];
+
+    // Get strings
+    LLVMRecordStringView filename(block->records[record.Op(0) - 1], 0);
+    LLVMRecordStringView contents(block->records[record.Op(1) - 1], 0);
+    ParseContentsAdapter(filename, contents);
+}
+
 std::string_view DXILDebugModule::GetFilename() {
     if (sourceFragments.empty()) {
         return {};
@@ -659,7 +1049,7 @@ void DXILDebugModule::FillCombinedSource(uint32_t fileUID, char *buffer) const {
 }
 
 uint32_t DXILDebugModule::GetLinearFileUID(uint32_t scopeMdId) {
-    Metadata& md = metadata[scopeMdId];
+    Metadata& md = thinMetadata[scopeMdId];
 
     // Handle scope
     uint32_t fileMdId;
@@ -690,35 +1080,663 @@ uint32_t DXILDebugModule::GetLinearFileUID(uint32_t scopeMdId) {
     }
 
     // Get file uid
-    Metadata& fileMd = metadata[fileMdId - 1];
+    Metadata& fileMd = thinMetadata[fileMdId - 1];
     ASSERT(fileMd.type == LLVMMetadataRecord::File, "Unexpected node");
 
     // OK
     return fileMd.file.linearFileUID;
 }
 
+struct StringViewAdapter {
+    bool StartsWithOffset(uint32_t offset, std::string_view str) const {
+        if (str.length() > view.length() - offset) {
+            return false;
+        }
+
+        for (uint32_t i = 0; i < str.length(); i++) {
+            if (str[i] != static_cast<char>(view[offset + i])) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    void SubStr(uint64_t begin, uint64_t end, char* buffer) const {
+        for (size_t i = begin; i < end; i++) {
+            buffer[i - begin] = static_cast<char>(view[i]);
+        }
+    }
+    
+    void SubStrTerminated(uint64_t begin, uint64_t end, char* buffer) const {
+        for (size_t i = begin; i < end; i++) {
+            buffer[i - begin] = static_cast<char>(view[i]);
+        }
+
+        // Terminator
+        buffer[end - begin] = '\0';
+    }
+            
+    template<typename F>
+    void CopyUntilTerminated(uint64_t begin, char* buffer, uint32_t length, F&& functor) const {
+        size_t i;
+        for (i = begin; i < std::min<size_t>(begin + length - 1, view.length()); i++) {
+            char ch = view[i];
+
+            // Break?
+            if (!functor(ch)) {
+                break;
+            }
+
+            // Append
+            buffer[i - begin] = ch;
+        }
+
+        // Terminator
+        buffer[i - begin] = '\0';
+    }
+
+    uint32_t Length() const {
+        return static_cast<uint32_t>(view.length());
+    }
+
+    char operator[](uint32_t i) const {
+        return view[i];
+    }
+
+    operator std::string_view() const {
+        return view;
+    }
+    
+    std::string_view view;
+};
+
 void DXILDebugModule::CreateFragmentsFromSourceBlock() {
-    // Block contents should never need resolving 
-    isContentsUnresolved = false;
+    // A single file either indicates that there's a single file, or, that the contents are unresolved
+    // f.x. line directives that need to be mapped
+    isContentsUnresolved = (shaderSourceInfo.sourceFiles.size() == 1);
 
     // Fill all files
     for (const DXBCPhysicalBlockShaderSourceInfo::SourceFile& file : shaderSourceInfo.sourceFiles) {
-        SourceFragment* fragment = FindOrCreateSourceFragmentSanitized(file.filename);
+        ParseContentsAdapter(
+            StringViewAdapter{ file.filename },
+            StringViewAdapter{ file.contents }
+        );
+    }
+}
 
-        // Block contents shouldn't require any preprocessing
-        // TODO: Consider backing storage, avoids needless copies
-        fragment->contents = file.contents;
+const char* DXILDebugModule::GetValueAllocation(uint32_t id) {
+    if (id >= valueStrings.size() || !valueStrings[id]) {
+        return nullptr;
+    }
 
-        // Initial line
-        fragment->lineOffsets.push_back(0);
+    // Current view
+    const LLVMRecordStringView& view = valueStrings[id];
+
+    // Not allocated?
+    if (!valueAllocations[id]) {
+        valueAllocations[id] = blockAllocator.AllocateArray<char>(view.Length() + 1);
+        view.CopyTerminated(valueAllocations[id]);
+    }
+
+    return valueAllocations[id];
+}
+
+const Backend::IL::Type* DXILDebugModule::GetTypeFromDwarf(Backend::IL::TypeMap& typeMap, uint32_t typeMdId) {
+    Metadata& typeMd = thinMetadata[typeMdId];
+
+    switch (typeMd.type) {
+        default: {
+            ASSERT(false, "Unexpected type");
+            break;
+        }
+        case LLVMMetadataRecord::DerivedType: {
+            switch (typeMd.derivedType.tag) {
+                default: {
+                    ASSERT(false, "Unexpected derived tag");
+                    break;
+                }
+                case LLVMDwarfTag::Typedef: {
+                    return GetTypeFromDwarf(typeMap, typeMd.derivedType._typedef.baseTypeMdId - 1);
+                }
+                case LLVMDwarfTag::Const: {
+                    return GetTypeFromDwarf(typeMap, typeMd.derivedType._const.baseTypeMdId - 1);
+                }
+            }
+            break;
+        }
+        case LLVMMetadataRecord::CompositeType: {
+            switch (typeMd.compositeType.tag) {
+                default: {
+                    ASSERT(false, "Unexpected composite tag");
+                    break;
+                }
+                case LLVMDwarfTag::ClassType: {
+                    return GetClassTypeFromDwarf(typeMap, typeMd);
+                }
+                case LLVMDwarfTag::StructureType: {
+                    return GetStructureTypeFromDwarf(typeMap, typeMd);
+                }
+                case LLVMDwarfTag::Array: {
+                    return GetArrayTypeFromDwarf(typeMap, typeMd);
+                }
+            }
+            break;
+        }
+        case LLVMMetadataRecord::BasicType: {
+            return GetBasicTypeFromDwarf(typeMap, typeMd);
+        }
+    }
+    
+    return nullptr;
+}
+
+const Backend::IL::Type * DXILDebugModule::GetClassTypeFromDwarf(Backend::IL::TypeMap &typeMap, const Metadata &typeMd) {
+    Metadata& memberListMd = thinMetadata[typeMd.compositeType._class.elementsMdId - 1];
+
+    // All elements
+    TrivialStackVector<const Backend::IL::Type*, 16> elements;
+
+    // Current bit offset
+    uint32_t bitOffset = 0;
+
+    // Populate all elements
+    for (uint32_t i = 0; i < memberListMd.record->opCount; i++) {
+        Metadata& memberMd = thinMetadata[memberListMd.record->Op32(i) - 1];
+        ASSERT(memberMd.type == LLVMMetadataRecord::DerivedType, "Unexpected type");
+        ASSERT(memberMd.derivedType.tag == LLVMDwarfTag::Member, "Unexpected tag");
+
+        // Aligned?
+        if (memberMd.derivedType.member.offset != bitOffset) {
+            ASSERT(memberMd.derivedType.member.offset > bitOffset, "Out of order declaration");
+
+            // Get padding requirement
+            uint32_t bitPadding = memberMd.derivedType.member.offset - bitOffset;
+            ASSERT(bitPadding % 8 == 0, "Padding not byte aligned");
+
+            // Insert dummy padding
+            elements.Add(typeMap.FindTypeOrAdd(Backend::IL::ArrayType {
+                .elementType = typeMap.FindTypeOrAdd(Backend::IL::IntType { .bitWidth = 8, .signedness = false }),
+                .count = bitPadding / 8
+            }));
+        }
+
+        // Get member type
+        elements.Add(GetTypeFromDwarf(typeMap, memberMd.derivedType.member.baseTypeMdId - 1));
         
-        // Summarize remaining line endings
-        for (size_t i = 0; i < fragment->contents.size(); i++) {
-            if (fragment->contents[i] == '\n') {
-                fragment->lineOffsets.push_back(static_cast<uint32_t>(i + 1));
+        // Next offset
+        bitOffset = memberMd.derivedType.member.offset + memberMd.derivedType.member.size;
+    }
+
+    // Name of the composite
+    LLVMRecordStringView name(*thinMetadata[typeMd.compositeType._class.nameMdId - 1].record, 0);
+
+    // If vector, try to represent it as such
+    if (name.StartsWith("vector")) {
+        ASSERT(elements.Size() <= 4, "Unexpected vector length");
+
+        // Vector elements must all match
+        bool bAllMatching = true;
+        for (uint64_t i = 1; i < elements.Size(); i++) {
+            bAllMatching &= elements[i] == elements[0];
+        }
+
+        if (bAllMatching) {
+            return typeMap.FindTypeOrAdd(Backend::IL::VectorType {
+                .containedType = elements[0],
+                .dimension = static_cast<uint8_t>(elements.Size())
+            });
+        }
+    }
+
+    // If matrix, try to represent it as such
+    if (name.StartsWith("matrix")) {
+        ASSERT(elements.Size() <= 16, "Unexpected matrix length");
+
+        // Attributes
+        uint32_t rows    = 0;
+        uint32_t columns = 0;
+        
+        Metadata& templateListMd = thinMetadata[typeMd.compositeType._class.templateParamsMdId - 1];
+
+        // Parse all arguments
+        for (uint32_t i = 0; i < templateListMd.record->opCount; i++) {
+            Metadata& argMd = thinMetadata[templateListMd.record->Op32(i) - 1];
+            switch (argMd.type) {
+                default: {
+                    break;
+                }
+                case LLVMMetadataRecord::TemplateType: {
+                    break;
+                }
+                case LLVMMetadataRecord::TemplateValue: {
+                    LLVMRecordStringView argName(*thinMetadata[argMd.templateValue.nameMdId - 1].record, 0);
+
+                    if (argName.StartsWith("row_count")) {
+                        Metadata& valueMd = thinMetadata[argMd.templateValue.valueMdId - 1];
+                        ASSERT(valueMd.type == LLVMMetadataRecord::Value, "Unexpected record");
+                        rows = static_cast<uint32_t>(GetLiteralConstant(valueMd.value));
+                    } else if (argName.StartsWith("col_count")) {
+                        Metadata& valueMd = thinMetadata[argMd.templateValue.valueMdId - 1];
+                        ASSERT(valueMd.type == LLVMMetadataRecord::Value, "Unexpected record");
+                        columns = static_cast<uint32_t>(GetLiteralConstant(valueMd.value));
+                    }
+                    break;
+                }
+            }
+        }
+        
+        // Matrix elements must all match
+        bool bAllMatching = true;
+        for (uint64_t i = 1; i < elements.Size(); i++) {
+            bAllMatching &= elements[i] == elements[0];
+        }
+
+        if (bAllMatching) {
+            return typeMap.FindTypeOrAdd(Backend::IL::MatrixType {
+                .containedType = elements[0],
+                .rows = static_cast<uint8_t>(rows),
+                .columns = static_cast<uint8_t>(columns)
+            });
+        }
+    }
+
+    // Otherwise assume struct
+    Backend::IL::StructType _struct;
+    for (const Backend::IL::Type* element : elements) {
+        _struct.memberTypes.push_back(element);
+    }
+    
+    return typeMap.FindTypeOrAdd(_struct);
+}
+
+const Backend::IL::Type * DXILDebugModule::GetStructureTypeFromDwarf(Backend::IL::TypeMap &typeMap, const Metadata &typeMd) {
+    Metadata& memberListMd = thinMetadata[typeMd.compositeType.structureType.elementsMdId - 1];
+
+    // All elements
+    TrivialStackVector<const Backend::IL::Type*, 16> elements;
+
+    // Current bit offset
+    uint32_t bitOffset = 0;
+
+    // Populate all elements
+    for (uint32_t i = 0; i < memberListMd.record->opCount; i++) {
+        Metadata& memberMd = thinMetadata[memberListMd.record->Op32(i) - 1];
+        ASSERT(memberMd.type == LLVMMetadataRecord::DerivedType, "Unexpected type");
+        ASSERT(memberMd.derivedType.tag == LLVMDwarfTag::Member, "Unexpected tag");
+
+        if (memberMd.derivedType.member.offset != bitOffset) {
+            ASSERT(memberMd.derivedType.member.offset > bitOffset, "Out of order declaration");
+
+            // Get padding requirement
+            uint32_t bitPadding = memberMd.derivedType.member.offset - bitOffset;
+            ASSERT(bitPadding % 8 == 0, "Padding not byte aligned");
+
+            // Insert dummy padding
+            elements.Add(typeMap.FindTypeOrAdd(Backend::IL::ArrayType {
+                .elementType = typeMap.FindTypeOrAdd(Backend::IL::IntType { .bitWidth = 8, .signedness = false }),
+                .count = bitPadding / 8
+            }));
+        }
+
+        // Get member type
+        elements.Add(GetTypeFromDwarf(typeMap, memberMd.derivedType.member.baseTypeMdId - 1));
+
+        // Next offset
+        bitOffset = memberMd.derivedType.member.offset + memberMd.derivedType.member.size;
+    }
+
+    // Otherwise assume struct
+    Backend::IL::StructType _struct;
+    for (const Backend::IL::Type* element : elements) {
+        _struct.memberTypes.push_back(element);
+    }
+    
+    return typeMap.FindTypeOrAdd(_struct);
+}
+
+const Backend::IL::Type * DXILDebugModule::GetArrayTypeFromDwarf(Backend::IL::TypeMap &typeMap, const Metadata &typeMd) {
+    Metadata& elementsListMd = thinMetadata[typeMd.compositeType.arrayType.elementsMdId - 1];
+
+    // Base type we start from
+    const Backend::IL::Type* baseType = GetTypeFromDwarf(typeMap, typeMd.compositeType.arrayType.baseTypeMdId - 1);
+    
+    // Populate all sub-ranges
+    for (uint32_t i = 0; i < elementsListMd.record->opCount; i++) {
+        Metadata& subRangeMd = thinMetadata[elementsListMd.record->Op32(i) - 1];
+        ASSERT(subRangeMd.subRange.lowerBound == 0, "Lower bounds not supported");
+        
+        baseType = typeMap.FindTypeOrAdd(Backend::IL::ArrayType {
+            .elementType = baseType,
+            .count = subRangeMd.subRange.count
+        });
+    }
+    
+    return baseType;
+}
+
+const Backend::IL::Type * DXILDebugModule::GetBasicTypeFromDwarf(Backend::IL::TypeMap &typeMap, const Metadata &typeMd) {
+    switch (typeMd.basicType.encoding) {
+        default: {
+            ASSERT(false, "Unexpected composite tag");
+            break;
+        }
+        case LLVMDwarfTypeEncoding::Bool: {
+            return typeMap.FindTypeOrAdd(Backend::IL::BoolType {});
+        }
+        case LLVMDwarfTypeEncoding::Float: {
+            return typeMap.FindTypeOrAdd(Backend::IL::FPType {
+                .bitWidth = static_cast<uint8_t>(typeMd.basicType.size)
+            });
+        }
+        case LLVMDwarfTypeEncoding::Signed: {
+            return typeMap.FindTypeOrAdd(Backend::IL::IntType {
+                .bitWidth = static_cast<uint8_t>(typeMd.basicType.size),
+                .signedness = true
+            });
+        }
+        case LLVMDwarfTypeEncoding::Unsigned: {
+            return typeMap.FindTypeOrAdd(Backend::IL::IntType {
+                .bitWidth = static_cast<uint8_t>(typeMd.basicType.size),
+                .signedness = false
+            });
+        }
+    }
+    
+    return nullptr;
+}
+
+void DXILDebugModule::ParseDebugCall(FunctionMetadata& functionMd, const LLVMRecord &record, uint32_t anchor, uint32_t functionValueIndex) {
+    // Determine call from string table
+    if (functionValueIndex >= valueStrings.size()) {
+        return;
+    }
+    
+    LLVMRecordStringView view = valueStrings[functionValueIndex];
+
+    // Debug value?
+    if (view.StartsWith("llvm.dbg.value")) {
+        ParseDebugValueCall(functionMd, record, anchor);
+    }
+}
+
+void DXILDebugModule::ParseDebugValueCall(FunctionMetadata& functionMd, const LLVMRecord &record, uint32_t anchor) {
+    // Interpret operands
+    uint32_t valueMdIndex    = anchor - static_cast<uint32_t>(record.Op(4));
+    uint32_t byteOffset      = anchor - static_cast<uint32_t>(record.Op(5));
+    uint32_t variableMdIndex = anchor - static_cast<uint32_t>(record.Op(6));
+    Metadata &variableMd     = thinMetadata[variableMdIndex];
+    Metadata& expressionMd   = thinMetadata[anchor - static_cast<uint32_t>(record.Op(7))];
+
+    // No instruction to associate with?
+    if (!functionMd.instructionMetadata.size()) {
+        return;
+    }
+
+    // By default, always associate with the last one
+    InstructionDwarfInfo &set = functionMd.instructionDwarfInfos[static_cast<uint32_t>(functionMd.instructionMetadata.size() - 1)];
+
+    // Try to find existing variable
+    InstructionDwarfVariable* variable = nullptr;
+    for (InstructionDwarfVariable& candidate : set.variables) {
+        if (candidate.variableMdId == variableMdIndex) {
+            variable = &candidate;
+            break;
+        }
+    }
+
+    // None found, create a new one
+    if (!variable) {
+        // Optional, variable name
+        char* variableName = nullptr;
+
+        // Copy over name if possible
+        if (variableMd.localVar.nameMdId) {
+            LLVMRecordStringView name(*thinMetadata[variableMd.localVar.nameMdId - 1].record, 0);
+            variableName = blockAllocator.AllocateArray<char>(name.Length() + 1);
+            name.CopyTerminated(variableName);
+        }
+        
+        variable = &set.variables.emplace_back();
+        variable->name = variableName;
+        variable->variableMdId = variableMdIndex;
+        variable->typeMdId = variableMd.localVar.mdTypeId;
+    }
+    
+    // Setup value
+    InstructionDwarfValue* value = variable->values.emplace_back(blockAllocator.Allocate<InstructionDwarfValue>());
+    value->valueId = IL::InvalidID;
+    value->kind = expressionMd.expression.op;
+    
+    if (Metadata &valueMd = thinMetadata[valueMdIndex]; valueMd.type == LLVMMetadataRecord::Value) {
+        value->valueId = valueMd.value;
+
+        // May not be resolved
+        if (value->valueId < thinValues.size()) {
+            ResolveDwarfValue(value);
+        } else {
+            unresolvedDwarfValues.push_back(value);
+        }
+    }
+    
+    // Copy over dwarf kind
+    switch (value->kind) {
+        default: {
+            break;
+        }
+        case LLVMDwarfOpKind::BitPiece: {
+            value->bitWise.bitStart = expressionMd.expression.bitPiece.bitStart;
+            value->bitWise.bitLength = expressionMd.expression.bitPiece.bitLength;
+            break;
+        }
+    }
+}
+
+void DXILDebugModule::ResolveDwarfValue(InstructionDwarfValue* value) {
+    // We cannot reliably cross-reference constants, just do records
+    const ThinValue& debugValue = thinValues[value->valueId];
+    switch (debugValue.kind) {
+        default: {
+            ASSERT(false, "Unexpected value");
+            return;
+        }
+        case ThinValueKind::Instruction: {
+            value->code.codeOffset = debugValue.recordOffset;
+            break;
+        }
+        case ThinValueKind::Constant: {
+            value->code.constant = ResolveConstant(value->valueId);
+            break;
+        }
+    }
+}
+
+template<typename T>
+const T* DXILDebugModule::AllocateThinConstant(const T& decl) {
+    T* value = blockAllocator.Allocate<T>(decl);
+    value->kind = T::kKind;
+    return value;
+}
+
+const IL::Constant* DXILDebugModule::ResolveConstant(uint32_t valueId) {
+    const ThinValue& debugValue = thinValues[valueId];
+    
+    // Type assigned
+    const ThinType& thinType = thinTypes[debugValue.thinType];
+    
+    // Resolve as much as possible
+    switch (static_cast<LLVMConstantRecord>(debugValue.record->id)) {
+        default: {
+            return AllocateThinConstant(IL::UnexposedConstant {});
+        }
+            
+        case LLVMConstantRecord::Null: {
+            return AllocateThinConstant(IL::NullConstant {});
+        }
+
+        case LLVMConstantRecord::Integer: {
+            if (thinType.integral.bitWidth == 1) {
+                return AllocateThinConstant(IL::BoolConstant {
+                    .value = debugValue.record->Op32(0) ? true : false
+                });
+            } else {
+                return AllocateThinConstant(IL::IntConstant {
+                    .value = debugValue.record->Op32(0)
+                });
+            }
+        }
+
+        case LLVMConstantRecord::Float: {
+            return AllocateThinConstant(IL::FPConstant {
+                .value = debugValue.record->OpBitCast<float>(0)
+            });
+        }
+
+        case LLVMConstantRecord::Aggregate: {
+            switch (thinType.type) {
+                default: {
+                    return AllocateThinConstant(IL::UnexposedConstant {});
+                }
+                case LLVMTypeRecord::StructAnon:
+                case LLVMTypeRecord::StructName:
+                case LLVMTypeRecord::StructNamed: {
+                    IL::StructConstant decl;
+
+                    // Fill members
+                    for (uint32_t i = 0; i < debugValue.record->opCount; i++) {
+                        uint32_t operand = debugValue.record->Op32(i);
+                        
+                        if (operand < thinValues.size()) {
+                            const IL::Constant *memberConstant = ResolveConstant(operand);
+                            decl.members.push_back(memberConstant);
+                        } else {
+                            return AllocateThinConstant(IL::UnexposedConstant {});
+                        }
+                    }
+
+                    return AllocateThinConstant(decl);
+                }
+                case LLVMTypeRecord::Vector: {
+                    IL::VectorConstant decl;
+
+                    // Fill members
+                    for (uint32_t i = 0; i < debugValue.record->opCount; i++) {
+                        uint32_t operand = debugValue.record->Op32(i);
+                        
+                        if (operand < thinValues.size()) {
+                            const IL::Constant *memberConstant = ResolveConstant(operand);
+                            decl.elements.push_back(memberConstant);
+                        } else {
+                            return AllocateThinConstant(IL::UnexposedConstant {});
+                        }
+                    }
+
+                    return AllocateThinConstant(decl);
+                }
+                case LLVMTypeRecord::Array: {
+                    IL::ArrayConstant decl;
+
+                    // Fill members
+                    for (uint32_t i = 0; i < debugValue.record->opCount; i++) {
+                        uint32_t operand = debugValue.record->Op32(i);
+                        
+                        if (operand < thinValues.size()) {
+                            const IL::Constant *memberConstant = ResolveConstant(operand);
+                            decl.elements.push_back(memberConstant);
+                        } else {
+                            return AllocateThinConstant(IL::UnexposedConstant {});
+                        }
+                    }
+
+                    return AllocateThinConstant(decl);
+                }
+            }
+        }
+
+        case LLVMConstantRecord::Data: {
+            switch (thinType.type) {
+                default: {
+                    return AllocateThinConstant(IL::UnexposedConstant {});
+                }
+                case LLVMTypeRecord::Vector: {
+                    IL::VectorConstant decl;
+
+                    const ThinType& containedThinType = thinTypes[thinType.aggregate.contained];
+                    
+                    // Fill members
+                    for (uint32_t i = 0; i < debugValue.record->opCount; i++) {
+                        switch (containedThinType.type) {
+                            default: {
+                                ASSERT(false, "Invalid type");
+                                decl.elements.push_back(AllocateThinConstant(IL::UnexposedConstant {}));
+                            }
+                            case LLVMTypeRecord::Integer: {
+                                if (thinType.integral.bitWidth == 1) {
+                                    decl.elements.push_back(AllocateThinConstant(IL::BoolConstant {
+                                        .value = debugValue.record->Op32(0) ? true : false
+                                    }));
+                                } else {
+                                    decl.elements.push_back(AllocateThinConstant(IL::IntConstant {
+                                        .value = debugValue.record->Op32(0)
+                                    }));
+                                }
+                                break;
+                            }
+                            case LLVMTypeRecord::Half:
+                            case LLVMTypeRecord::Float:
+                            case LLVMTypeRecord::Double: {
+                                decl.elements.push_back(AllocateThinConstant(IL::FPConstant {
+                                    .value = debugValue.record->OpBitCast<float>(0)
+                                }));
+                            }
+                        }
+                    }
+
+                    return AllocateThinConstant(decl);
+                }
+                case LLVMTypeRecord::Array: {
+                    IL::ArrayConstant decl;
+
+                    const ThinType& containedThinType = thinTypes[thinType.aggregate.contained];
+                    
+                    // Fill members
+                    for (uint32_t i = 0; i < debugValue.record->opCount; i++) {
+                        switch (containedThinType.type) {
+                            default: {
+                                ASSERT(false, "Invalid type");
+                                decl.elements.push_back(AllocateThinConstant(IL::UnexposedConstant {}));
+                            }
+                            case LLVMTypeRecord::Integer: {
+                                if (thinType.integral.bitWidth == 1) {
+                                    decl.elements.push_back(AllocateThinConstant(IL::BoolConstant {
+                                        .value = debugValue.record->Op32(0) ? true : false
+                                    }));
+                                } else {
+                                    decl.elements.push_back(AllocateThinConstant(IL::IntConstant {
+                                        .value = debugValue.record->Op32(0)
+                                    }));
+                                }
+                                break;
+                            }
+                            case LLVMTypeRecord::Half:
+                            case LLVMTypeRecord::Float:
+                            case LLVMTypeRecord::Double: {
+                                decl.elements.push_back(AllocateThinConstant(IL::FPConstant {
+                                    .value = debugValue.record->OpBitCast<float>(0)
+                                }));
+                            }
+                        }
+                    }
+
+                    return AllocateThinConstant(decl);
+                }
             }
         }
     }
+}
+
+uint64_t DXILDebugModule::GetLiteralConstant(uint32_t valueId) {
+    return LLVMBitStreamReader::DecodeSigned(thinValues[valueId].record->Op(0));
 }
 
 DXILDebugModule::SourceFragment *DXILDebugModule::FindOrCreateSourceFragmentSanitized(const LLVMRecordStringView &view) {

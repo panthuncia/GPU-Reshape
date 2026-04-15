@@ -79,11 +79,11 @@ bool ShaderCompiler::Install() {
 
     // Get number of resources
     uint32_t resourceCount;
-    shaderDataHost->Enumerate(&resourceCount, nullptr, ShaderDataType::All);
+    shaderDataHost->EnumerateShader(&resourceCount, nullptr, ShaderDataType::AllGlobal);
 
     // Fill resources
     shaderData.resize(resourceCount);
-    shaderDataHost->Enumerate(&resourceCount, shaderData.data(), ShaderDataType::All);
+    shaderDataHost->EnumerateShader(&resourceCount, shaderData.data(), ShaderDataType::AllGlobal);
 
     // OK
     return true;
@@ -116,6 +116,7 @@ bool ShaderCompiler::InitializeModule(ShaderModuleState *state) {
 
         // Failed?
         if (!result) {
+            state->spirvModule = nullptr;
             return false;
         }
     }
@@ -183,6 +184,9 @@ bool ShaderCompiler::CompileShader(const ShaderJobEntry &job) {
     // Create a copy of the module, don't modify the source
     SpvModule *module = job.info.state->spirvModule->Copy();
 
+    // Assign the instrumentation hash, may be used within features for tracking
+    module->GetProgram()->SetShaderInstrumentationHash(job.info.instrumentationKey.combinedHash);
+
     // Spv job
     SpvJob spvJob;
     spvJob.instrumentationKey = job.info.instrumentationKey;
@@ -202,7 +206,7 @@ bool ShaderCompiler::CompileShader(const ShaderJobEntry &job) {
 
     // Pre-injection
     for (size_t i = 0; i < shaderFeatures.size(); i++) {
-        if (!(job.info.instrumentationKey.featureBitSet & (1ull << i))) {
+        if (!(job.info.instrumentationKey.featureBitSet & (1ull << i)) || !shaderFeatures[i]) {
             continue;
         }
 
@@ -212,7 +216,7 @@ bool ShaderCompiler::CompileShader(const ShaderJobEntry &job) {
 
     // Pass through all features
     for (size_t i = 0; i < shaderFeatures.size(); i++) {
-        if (!(job.info.instrumentationKey.featureBitSet & (1ull << i))) {
+        if (!(job.info.instrumentationKey.featureBitSet & (1ull << i)) || !shaderFeatures[i]) {
             continue;
         }
 
@@ -252,10 +256,11 @@ bool ShaderCompiler::CompileShader(const ShaderJobEntry &job) {
     }
 
     // Resulting module
-    VkShaderModule instrument;
+    auto* instrument = new (allocators) ShaderModuleInstrument();
+    instrument->featureTable = module->GetProgram()->GetFeatureTable();
 
     // Attempt to compile the program
-    VkResult result = job.table->next_vkCreateShaderModule(job.table->object, &createInfo, nullptr, &instrument);
+    VkResult result = job.table->next_vkCreateShaderModule(job.table->object, &createInfo, nullptr, &instrument->object);
     if (result != VK_SUCCESS) {
         scope.Add(DiagnosticType::ShaderCreationFailed);
         ++job.info.diagnostic->failedJobs;

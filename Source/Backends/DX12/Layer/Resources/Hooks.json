@@ -8,6 +8,7 @@
     "DescriptorHeap.h",
     "Pipeline.h",
     "PipelineLibrary.h",
+    "Raytracing.h",
     "Fence.h",
     "CommandList.h",
     "SwapChain.h",
@@ -198,6 +199,7 @@
         "Reset",
         "Close",
         "SetPipelineState",
+        "SetPipelineState1",
         "SetDescriptorHeaps",
         "SetGraphicsRootSignature",
         "SetComputeRootSignature",
@@ -216,6 +218,7 @@
         "CopyBufferRegion",
         "CopyTextureRegion",
         "ResourceBarrier",
+        "RSSetViewports",
         "Barrier",
         "BeginRenderPass",
         "EndRenderPass",
@@ -225,6 +228,10 @@
         "ExecuteIndirect",
         "CopyTiles",
         "DispatchMesh",
+        "DispatchRays",
+        "SetMarker",
+        "BeginEvent",
+        "EndEvent",
         "GetDevice",
         "GetType"
       ],
@@ -246,7 +253,11 @@
         "DiscardResource",
         "BeginRenderPass",
         "EndRenderPass",
-        "OMSetRenderTargets"
+        "OMSetRenderTargets",
+        "ExecuteIndirect"
+      ],
+      "manual-proxies": [
+        "ExecuteIndirect"
       ]
     },
     "ID3D12StateObject": {

@@ -128,7 +128,7 @@ ShaderSGUID ShaderSGUIDHost::Bind(const IL::Program &program, const IL::BasicBlo
     // Debug modules are optional
     if (IDXDebugModule* debugModule = shaderState->module->GetDebug()) {
         // Try to get the association
-        if (DXSourceAssociation sourceAssociation = debugModule->GetSourceAssociation(ptr->source.codeOffset)) {
+        if (DXSourceAssociation sourceAssociation = debugModule->GetSourceAssociation(instruction.block->GetFunction(), ptr->source.codeOffset)) {
             mapping.fileUID = sourceAssociation.fileUID;
             mapping.line = sourceAssociation.line;
             mapping.column = sourceAssociation.column;
@@ -157,6 +157,7 @@ ShaderSGUID ShaderSGUIDHost::Bind(const IL::Program &program, const IL::BasicBlo
 
         // Out of indices
         else {
+            device->logBuffer->Add("DX12", LogSeverity::Error, "Exhausted shader SGUID allocation indices, source association may fail");
             return InvalidShaderSGUID;
         }
 

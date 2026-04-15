@@ -51,46 +51,120 @@
     </UserControl.Resources>
     
     <Grid Focusable="True" RowDefinitions="Auto,*">
-        <StackPanel Orientation="Vertical">
-            <Grid Margin="5,0,5,0">
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
-                    <Button Classes="Icon" ToolTip.Tip="{x:Static r:Resources.ShaderTree_Refresh_Tooltip}" Command="{Binding Refresh}">
-                        <PathIcon Data="{StaticResource Refresh}" Width="13" />
-                    </Button>
-                </StackPanel>
-                
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                    <TextBlock VerticalAlignment="Center" x:Name="CountBlock" Text="{Binding ShaderIdentifiers.Count, FallbackValue=0}"/>
-                    <TextBlock VerticalAlignment="Center" Text="shaders" Margin="5 0 0 0"/>
-                </StackPanel>
-            </Grid>
-        </StackPanel>
+        <Grid>
+            <Grid Margin="5,0,5,2">
+                <Button 
+                HorizontalAlignment="Left"
+                Classes="Icon" 
+                ToolTip.Tip="{x:Static r:Resources.ShaderTree_Refresh_Tooltip}" 
+                Command="{Binding Refresh}">
+                <PathIcon Data="{StaticResource Refresh}" Width="13" />
+            </Button>
+            
+            <AutoCompleteBox 
+                x:Name="QueryBox"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Top"
+                Height="25"
+                Watermark="{Binding ShaderIdentifiers.Count, FallbackValue=0, StringFormat='Search {0} shaders'}"
+                Margin="25,0 25,0"
+                BorderThickness="0 0 0 1"
+                Text="{Binding FilterString}" />
+                <Button 
+                    Classes="Icon"
+                    HorizontalAlignment="Right"
+                    Width="25"
+                    Height="25"
+                    Margin="0 0 1 0">
+                    <PathIcon ToolTip.Tip="{x:Static r:Resources.Help_Tooltip}" Data="{StaticResource Question}" Width="13" />
+                    
+                    <Button.Flyout>
+                        <Flyout Placement="BottomEdgeAlignedRight">
+                            <StackPanel Orientation="Vertical" Width="350">
+                                <TextBlock TextWrapping="Wrap">
+Search string, case insensitive. Additional attributes:
+                                </TextBlock>
+                                <Grid Margin="25 0 0 0" ColumnDefinitions="35,*">
+                                    <TextBlock TextWrapping="Wrap" Grid.Column="0">
+language <LineBreak />
+                                    </TextBlock>
+                                    <TextBlock TextWrapping="Wrap" Grid.Column="1">
+- Language (spirv, dxil, dxbc) <LineBreak />
+                                    </TextBlock>
+                                </Grid>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                </Button>
 
+                <controls:QueryAttributeSegments x:Name="AttributeSegments" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="0 26 0 0"/>
+            </Grid>
+        </Grid>
+        
         <ListBox 
             Grid.Row="1" 
             x:Name="ShaderList" 
             ContextMenu="{StaticResource ReactiveContextMenu}" 
             BorderThickness="0"
             Tag="{Binding}"
-            ItemsSource="{Binding ShaderIdentifiers}" 
-            SelectionMode="Multiple">
+            ItemsSource="{Binding FilteredIdentifiers}"
+            ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+            SelectionMode="Multiple"
+            LayoutUpdated="OnListboxLayoutUpdated">
+            <ListBox.Styles>
+                <Style Selector="ListBoxItem">
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                </Style>
+            </ListBox.Styles>
             <ListBox.ItemTemplate>
                 <DataTemplate DataType="sm:ShaderIdentifierViewModel">
-                    <StackPanel Orientation="Horizontal">
-                        <Border IsVisible="{Binding Language, Converter={StaticResource ShaderLanguageConverter}}"
-                                Background="{Binding Language, Converter={StaticResource ShaderLanguageConverter}}"
-                                CornerRadius="5"
-                                Padding="5 2 5 2"
-                                Margin="0 0 5 0">
+                    <DockPanel
+                        LastChildFill="True"
+                        HorizontalAlignment="Stretch">
+                        <Border
+                            DockPanel.Dock="Left"
+                            IsVisible="{Binding Language, Converter={StaticResource ShaderLanguageConverter}}"
+                            Background="{Binding Language, Converter={StaticResource ShaderLanguageConverter}}"
+                            CornerRadius="5"
+                            Padding="5 2 5 2"
+                            Margin="0 0 5 0">
                             <TextBlock Text="{Binding Language}"/>
                         </Border>
-                        <TextBlock Height="20" Text="{Binding Descriptor}" LayoutUpdated="OnShaderIdentifierLayoutUpdated"/>
-                    </StackPanel>
+                        
+                        <StackPanel 
+                            DockPanel.Dock="Right"
+                            Orientation="Horizontal"
+                            HorizontalAlignment="Right">
+                            <Ellipse 
+                                Width="3" Height="3" 
+                                Margin="0 0 3 0"
+                                Fill="{StaticResource StatusActive}" 
+                                ToolTip.Tip="{x:Static r:Resources.Status_Active}"
+                                IsVisible="{Binding Active}"/>
+                        
+                            <Ellipse 
+                                Width="3" Height="3" 
+                                Margin="0 0 3 0"
+                                Fill="{StaticResource StatusInstrumented}"
+                                ToolTip.Tip="{x:Static r:Resources.Status_Instrumented}"
+                                IsVisible="{Binding Instrumented}"/>
+                        </StackPanel>
+                        
+                        <TextBlock 
+                            DockPanel.Dock="Left"
+                            Height="20" 
+                            HorizontalAlignment="Stretch"
+                            TextTrimming="CharacterEllipsis"
+                            Margin="0 0 5 0"
+                            Text="{Binding Descriptor}"/>
+                    </DockPanel>
                 </DataTemplate>
             </ListBox.ItemTemplate>
         </ListBox>
         
-        <Grid Grid.Row="1" IsVisible="{Binding IsHelpVisible}">
+        <Grid 
+            Grid.Row="1"
+            IsVisible="{Binding IsHelpVisible}">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                 <PathIcon 
                     Data="{StaticResource InfoHollow}"

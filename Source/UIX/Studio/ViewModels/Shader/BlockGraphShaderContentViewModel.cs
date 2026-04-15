@@ -24,18 +24,18 @@
 // ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
-using System;
+using System.Collections.ObjectModel;
 using System.Windows.Input;
 using Avalonia.Media;
 using ReactiveUI;
 using Runtime.ViewModels.Shader;
 using Runtime.ViewModels.Traits;
-using Studio.Models.Workspace.Objects;
 using Studio.Services;
 using Studio.ViewModels.Documents;
 using Studio.ViewModels.Workspace.Objects;
 using Studio.ViewModels.Workspace.Services;
 using Studio.ViewModels.Workspace.Properties;
+using ShaderViewModel = Studio.ViewModels.Workspace.Objects.ShaderViewModel;
 
 namespace Studio.ViewModels.Shader
 {
@@ -45,7 +45,7 @@ namespace Studio.ViewModels.Shader
         /// The owning navigation context
         /// </summary>
         public INavigationContext? NavigationContext { get; set; }
-        
+
         /// <summary>
         /// Given descriptor
         /// </summary>
@@ -70,6 +70,11 @@ namespace Studio.ViewModels.Shader
             get => _icon;
             set => this.RaiseAndSetIfChanged(ref _icon, value);
         }
+
+        /// <summary>
+        /// Tooling tip
+        /// </summary>
+        public string? ToolTip => Resources.Resources.ShaderView_BlockGraph;
         
         /// <summary>
         /// Workspace within this overview
@@ -79,6 +84,11 @@ namespace Studio.ViewModels.Shader
             get => _propertyCollection;
             set => this.RaiseAndSetIfChanged(ref _propertyCollection, value);
         }
+
+        /// <summary>
+        /// All services
+        /// </summary>
+        public ObservableCollection<IDestructableObject> Services { get; } = new();
 
         /// <summary>
         /// Is this model active?
@@ -99,21 +109,26 @@ namespace Studio.ViewModels.Shader
         }
 
         /// <summary>
-        /// Underlying object
+        /// Assigned content
         /// </summary>
-        public Workspace.Objects.ShaderViewModel? Object
+        public object? Content
         {
-            get => _object;
+            get => _content;
             set
             {
-                this.RaiseAndSetIfChanged(ref _object, value);
-
-                if (_object != null)
+                this.RaiseAndSetIfChanged(ref _content, value);
+                
+                if (_content != null)
                 {
                     OnObjectChanged();
                 }
             }
         }
+
+        /// <summary>
+        /// Shader view model of the content
+        /// </summary>
+        public ShaderViewModel? ShaderViewModel => Content as ShaderViewModel;
 
         public BlockGraphShaderContentViewModel()
         {
@@ -130,7 +145,7 @@ namespace Studio.ViewModels.Shader
                 // Create navigation vm
                 service.SelectedShader = new ShaderNavigationViewModel()
                 {
-                    Shader = Object,
+                    Shader = ShaderViewModel,
                     SelectedFile = null
                 };
             }
@@ -158,16 +173,11 @@ namespace Studio.ViewModels.Shader
         private void OnObjectChanged()
         {
             // Submit request if not already
-            if (Object!.Contents == string.Empty)
+            if (ShaderViewModel!.BlockGraph == string.Empty)
             {
-                PropertyCollection?.GetService<IShaderCodeService>()?.EnqueueShaderBlockGraph(Object);
+                PropertyCollection?.GetService<IShaderCodeService>()?.EnqueueShaderBlockGraph(ShaderViewModel);
             }
         }
-
-        /// <summary>
-        /// Internal object
-        /// </summary>
-        private Workspace.Objects.ShaderViewModel? _object;
 
         /// <summary>
         /// Underlying view model
@@ -188,5 +198,15 @@ namespace Studio.ViewModels.Shader
         /// Internal active state
         /// </summary>
         private bool _isActive = false;
+
+        /// <summary>
+        /// Internal shader
+        /// </summary>
+        private ShaderViewModel? _shaderViewModel;
+
+        /// <summary>
+        /// Internal content
+        /// </summary>
+        private object? _content;
     }
 }

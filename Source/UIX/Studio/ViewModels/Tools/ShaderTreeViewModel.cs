@@ -27,22 +27,23 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
+using System.Reactive.Linq;
 using System.Windows.Input;
-using Avalonia;
 using Avalonia.Media;
 using Avalonia.Threading;
 using Bridge.CLR;
-using Dock.Model.ReactiveUI.Controls;
 using DynamicData;
-using DynamicData.Binding;
 using Message.CLR;
 using ReactiveUI;
-using Runtime.Models.Objects;
+using Runtime.Models.Query;
 using Runtime.ViewModels.Objects;
 using Runtime.ViewModels.Tools;
-using Studio.Models.Logging;
+using Studio.Extensions;
 using Studio.Services;
+using Studio.Services.Suspension;
 using Studio.ViewModels.Documents;
+using Studio.ViewModels.Query;
 using Studio.ViewModels.Workspace;
 
 namespace Studio.ViewModels.Tools
@@ -53,18 +54,33 @@ namespace Studio.ViewModels.Tools
         /// Tooling icon
         /// </summary>
         public override StreamGeometry? Icon => ResourceLocator.GetIcon("ToolShaderTree");
+
+        /// <summary>
+        /// Tooling tip
+        /// </summary>
+        public override string? ToolTip => Resources.Resources.Tool_Shaders;
         
         /// <summary>
         /// All identifiers
         /// </summary>
         public ObservableCollection<ShaderIdentifierViewModel> ShaderIdentifiers { get; } = new();
+        
+        /// <summary>
+        /// All filtered identifiers
+        /// </summary>
+        public ObservableCollection<ShaderIdentifierViewModel> FilteredIdentifiers { get; } = new();
+
+        /// <summary>
+        /// All visible and pooled identifiers
+        /// </summary>
+        public ObservableCollection<ShaderIdentifierViewModel> PooledIdentifiers { get; } = new();
 
         /// <summary>
         /// Is the help message visible?
         /// </summary>
         public bool IsHelpVisible
         {
-            get => ShaderIdentifiers.Count == 0;
+            get => FilteredIdentifiers.Count == 0;
         }
 
         /// <summary>
@@ -84,6 +100,43 @@ namespace Studio.ViewModels.Tools
         }
 
         /// <summary>
+        /// Current filter string
+        /// </summary>
+        [DataMember]
+        public string FilterString
+        {
+            get => _filterString;
+            set => this.RaiseAndSetIfChanged(ref _filterString, value);
+        }
+
+        /// <summary>
+        /// Parsed filter query
+        /// </summary>
+        public ShaderQueryViewModel? FilterQuery
+        {
+            get => _filterQuery;
+            set => this.RaiseAndSetIfChanged(ref _filterQuery, value);
+        }
+
+        /// <summary>
+        /// Current filter status
+        /// </summary>
+        public QueryResult FilterStatus
+        {
+            get => _filterStatus;
+            set => this.RaiseAndSetIfChanged(ref _filterStatus, value);
+        }
+
+        /// <summary>
+        /// All string decorators
+        /// </summary>
+        public SourceList<QueryAttributeDecorator> QueryDecorators
+        {
+            get => _queryDecorators;
+            set => this.RaiseAndSetIfChanged(ref _queryDecorators, value);
+        }
+
+        /// <summary>
         /// Refresh all items
         /// </summary>
         public ICommand Refresh { get; }
@@ -98,15 +151,214 @@ namespace Studio.ViewModels.Tools
             Refresh = ReactiveCommand.Create(OnRefresh);
             OpenShaderDocument = ReactiveCommand.Create<ShaderIdentifierViewModel>(OnOpenShaderDocument);
             
-            // Bind visibility
-            ShaderIdentifiers.ToObservableChangeSet(x => x)
-                .OnItemAdded(_ => this.RaisePropertyChanged(nameof(IsHelpVisible)))
-                .Subscribe();
+            // Initialize filter status
+            FilterStatus = QueryResult.OK;
             
             // Bind selected workspace
             ServiceRegistry.Get<IWorkspaceService>()?
                 .WhenAnyValue(x => x.SelectedWorkspace)
                 .Subscribe(x => WorkspaceViewModel = x);
+
+            // Notify on query string change
+            this.WhenAnyValue(x => x.FilterString)
+                .Throttle(TimeSpan.FromMilliseconds(250))
+                .ObserveOn(RxApp.MainThreadScheduler)
+                .Subscribe(CreateFilterQuery);
+            
+            // Create timer on main thread
+            _poolingTimer = new DispatcherTimer(DispatcherPriority.Background)
+            {
+                Interval = TimeSpan.FromMilliseconds(500),
+                IsEnabled = true
+            };
+
+            // Subscribe tick
+            _poolingTimer.Tick += OnPoolingTick;
+
+            // Must call start manually (a little vague)
+            _poolingTimer.Start();
+            
+            // Suspension
+            this.BindTypedSuspension();
+        }
+
+        /// <summary>
+        /// Invoked on ticks
+        /// </summary>
+        private void OnPoolingTick(object? sender, EventArgs e)
+        {
+            if (_workspaceViewModel is not { Connection: { } } || PooledIdentifiers.Count == 0)
+                return;
+            
+            // Create request
+            var message = _workspaceViewModel.Connection.GetSharedBus().Add<GetShaderStatusMessage>(new GetShaderStatusMessage.AllocationInfo
+            {
+                shaderUIDsCount = (ulong)PooledIdentifiers.Count
+            });
+
+            // Fill all UIDs
+            for (var i = 0; i < PooledIdentifiers.Count; i++)
+            {
+                message.shaderUIDs.SetValue(i, PooledIdentifiers[i].GUID);
+            }
+        }
+
+        /// <summary>
+        /// Pool an immediate identifier
+        /// </summary>
+        public void PoolImmediate(ShaderIdentifierViewModel identifierViewModel)
+        {
+            if (_workspaceViewModel is not { Connection: { } })
+                return;
+
+            // Submit it immediately
+            var message = _workspaceViewModel.Connection.GetSharedBus().Add<GetShaderStatusMessage>(new GetShaderStatusMessage.AllocationInfo { shaderUIDsCount = 1 });
+            message.shaderUIDs.SetValue(0, identifierViewModel.GUID);
+        }
+        
+        /// <summary>
+        /// Update help visibility
+        /// </summary>
+        private void UpdateHelp()
+        {
+            this.RaisePropertyChanged(nameof(IsHelpVisible));
+        }
+
+        /// <summary>
+        /// Disable all filtering
+        /// </summary>
+        private void DisableFilter()
+        {
+            FilterQuery = null;
+            
+            // Stop auto-population
+            _alwaysPopulate = false;
+            
+            // Recreate identifiers
+            RefilterShaders();
+        }
+
+        /// <summary>
+        /// Create a new filter query
+        /// </summary>
+        /// <param name="query">given query</param>
+        private void CreateFilterQuery(string query)
+        {
+            if (string.IsNullOrWhiteSpace(query))
+            {
+                DisableFilter();
+                return;
+            }
+            
+            // Try to parse collection
+            QueryAttribute[]? attributes = QueryParser.GetAttributes(query, true);
+            if (attributes == null)
+            {
+                FilterStatus = QueryResult.Invalid;
+                
+                // Something went wrong, disable
+                DisableFilter();
+                return;
+            }
+
+            // We've started a query, request complete population of the entire missing range
+            // If sparse, this will request redundant identifiers
+            PopulatePendingRange();
+
+            // Create new segment list
+            QueryDecorators.Clear();
+
+            // Visualize segments
+            foreach (QueryAttribute attribute in attributes)
+            {
+                QueryDecorators.Add(new QueryAttributeDecorator()
+                {
+                    Attribute = attribute,
+                    Color = attribute.Key switch
+                    {
+                        "type" => ResourceLocator.GetResource<Color>("ShaderFilterKeyType"),
+                        _ => ResourceLocator.GetResource<Color>("ShaderFilterKeyName")
+                    }
+                });
+            }
+
+            // Attempt to parse
+            FilterStatus = ShaderQueryViewModel.FromAttributes(attributes, out var queryObject);
+
+            // Set decorator
+            if (queryObject != null)
+            {
+                queryObject.Decorator = query;
+            }
+
+            // Set query
+            FilterQuery = queryObject;
+
+            // Auto-populate any future identifier
+            _alwaysPopulate = true;
+            
+            // Refilter if needed
+            RefilterShaders();
+        }
+
+        /// <summary>
+        /// Refilter all shaders
+        /// </summary>
+        private void RefilterShaders()
+        {
+            // Clear previous range
+            FilteredIdentifiers.Clear();
+            _filterSet.Clear();
+
+            // If no query, just add them all
+            if (FilterQuery == null)
+            {
+                FilteredIdentifiers.AddRange(ShaderIdentifiers);
+            }
+            else
+            {
+                ShaderIdentifiers.ForEach(x => FilterShader(x));
+            }
+
+            UpdateHelp();
+        }
+
+        /// <summary>
+        /// Filter a specific shader
+        /// Adds it if passed
+        /// </summary>
+        private bool FilterShader(ShaderIdentifierViewModel identifierViewModel)
+        {
+            // If already handled, ignore
+            if (_filterSet.Contains(identifierViewModel))
+            {
+                return true;
+            }
+            
+            // If there's no query, just mark it as visible
+            if (FilterQuery == null)
+            {
+                // No need to add it to the set, cleared on query construction
+                FilteredIdentifiers.Add(identifierViewModel);
+                return true;
+            }
+
+            // Matching name?
+            if (!string.IsNullOrEmpty(FilterQuery.Name) && !identifierViewModel.Descriptor.Contains(FilterQuery.Name, StringComparison.InvariantCultureIgnoreCase))
+            {
+                return false;
+            }
+
+            // Language?
+            if (!string.IsNullOrEmpty(FilterQuery.Language) && !(identifierViewModel.Language?.Contains(FilterQuery.Language, StringComparison.InvariantCultureIgnoreCase) ?? false))
+            {
+                return false;
+            }
+            
+            // Passed, mark as filtered
+            FilteredIdentifiers.Add(identifierViewModel);
+            _filterSet.Add(identifierViewModel);
+            return true;
         }
 
         /// <summary>
@@ -165,8 +417,10 @@ namespace Studio.ViewModels.Tools
         private void OnConnectionChanged()
         {
             // Clear states
+            FilteredIdentifiers.Clear();
             ShaderIdentifiers.Clear();
             _lookup.Clear();
+            UpdateHelp();
             
             if (_workspaceViewModel is not { Connection: { } })
                 return;
@@ -203,6 +457,31 @@ namespace Studio.ViewModels.Tools
         }
 
         /// <summary>
+        /// Populate a missing range
+        /// </summary>
+        private void PopulatePendingRange()
+        {
+            int start = int.MaxValue;
+            int end = 0;
+            
+            // Find the range bounds
+            for (int i = 0; i < ShaderIdentifiers.Count; i++)
+            {
+                if (ShaderIdentifiers[i].GUID == ulong.MaxValue)
+                {
+                    start = int.Min(start, i);
+                    end = int.Max(end, i);
+                }
+            }
+
+            // Invalid if no missing entries
+            if (start != int.MaxValue)
+            {
+                PopulateRange(start, end);
+            }
+        }
+
+        /// <summary>
         /// Bridge handler
         /// </summary>
         /// <param name="streams"></param>
@@ -235,8 +514,38 @@ namespace Studio.ViewModels.Tools
                     case ShaderNameMessage.ID:
                         Handle(message.Get<ShaderNameMessage>());
                         break;
+                    case ShaderStatusCollectionMessage.ID:
+                        Handle(message.Get<ShaderStatusCollectionMessage>());
+                        break;
                 }
             }
+        }
+
+        /// <summary>
+        /// Message handler
+        /// </summary>
+        private void Handle(ShaderStatusCollectionMessage message)
+        {
+            List<ShaderStatusMessage.FlatInfo> list = new();
+            
+            // Flatten shaders
+            foreach (ShaderStatusMessage status in new StaticMessageView<ShaderStatusMessage>(message.status.Stream))
+            {
+                list.Add(status.Flat);
+            }
+            
+            // Update all active states on the UI thread
+            Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                foreach (ShaderStatusMessage.FlatInfo info in list)
+                {
+                    if (_lookup.TryGetValue(info.shaderUID, out ShaderIdentifierViewModel? value))
+                    {
+                        value.Active = info.active == 1;
+                        value.Instrumented = info.instrumented == 1;
+                    }
+                }
+            });
         }
 
         /// <summary>
@@ -266,6 +575,7 @@ namespace Studio.ViewModels.Tools
                     {
                         var request = bus.Add<GetShaderCodeMessage>();
                         request.poolCode = 0;
+                        request.deferred = 1;
                         request.shaderUID = flat.shaderUID;
                     }
                 }
@@ -351,19 +661,53 @@ namespace Studio.ViewModels.Tools
                     }
                     
                     ShaderIdentifiers.RemoveAt((int)i);
+
+                    // TODO: Expensive
+                    FilteredIdentifiers.Remove(shaderIdentifierViewModel);
+                }
+
+                // Immediately populate if needed
+                if (_alwaysPopulate)
+                {
+                    PopulateRange(ShaderIdentifiers.Count, (int)flat.shaderCount);
                 }
 
                 // Add new models
                 for (int i = ShaderIdentifiers.Count; i < flat.shaderCount; i++)
                 {
-                    ShaderIdentifiers.Add(new()
+                    ShaderIdentifierViewModel viewModel = new()
                     {
                         Workspace = WorkspaceViewModel,
-                        GUID = 0,
+                        GUID = ulong.MaxValue,
                         Descriptor = "Loading..."
-                    });
+                    };
+
+                    // Bind filtering events
+                    BindFiltering(viewModel);
+                    
+                    ShaderIdentifiers.Add(viewModel);
                 }
+            
+                // Update label
+                UpdateHelp();
             });
+        }
+
+        /// <summary>
+        /// Bind all filtering events
+        /// </summary>
+        private void BindFiltering(ShaderIdentifierViewModel viewModel)
+        {
+            // Try to filter immediately
+            if (FilterShader(viewModel))
+            {
+                return;
+            }
+
+            // Otherwise, bind for future changes
+            viewModel
+                .WhenAnyValue(x => x.Descriptor)
+                .Subscribe(x => FilterShader(viewModel));
         }
 
         /// <summary>
@@ -411,6 +755,8 @@ namespace Studio.ViewModels.Tools
                         _lookup.Add(guids[i], shaderIdentifierViewModel);
                     }
                 }
+            
+                UpdateHelp();
             });
         }
 
@@ -420,8 +766,10 @@ namespace Studio.ViewModels.Tools
         private void OnRefresh()
         {
             // Clear states
+            FilteredIdentifiers.Clear();
             ShaderIdentifiers.Clear();
             _lookup.Clear();
+            UpdateHelp();
             
             // Immediate repool
             _workspaceViewModel?.Connection?.GetSharedBus().Add<GetObjectStatesMessage>();
@@ -438,8 +786,43 @@ namespace Studio.ViewModels.Tools
         private Dictionary<UInt64, ShaderIdentifierViewModel> _lookup = new();
 
         /// <summary>
+        /// Set of filtered shaders
+        /// </summary>
+        private HashSet<ShaderIdentifierViewModel> _filterSet = new();
+
+        /// <summary>
         /// Internal pooling timer
         /// </summary>
         private DispatcherTimer? _poolTimer;
+
+        /// <summary>
+        /// Internal, default, connection string
+        /// </summary>
+        private string _filterString = "";
+
+        /// <summary>
+        /// Internal filter query
+        /// </summary>
+        private ShaderQueryViewModel? _filterQuery;
+
+        /// <summary>
+        /// Internal decorators
+        /// </summary>
+        private SourceList<QueryAttributeDecorator> _queryDecorators = new();
+
+        /// <summary>
+        /// Internal status
+        /// </summary>
+        private QueryResult _filterStatus;
+
+        /// <summary>
+        /// Always populate identifiers on discovery?
+        /// </summary>
+        private bool _alwaysPopulate = true;
+
+        /// <summary>
+        /// Timer for pooling
+        /// </summary>
+        private readonly DispatcherTimer _poolingTimer;
     }
 }

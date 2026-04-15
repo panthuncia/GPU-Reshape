@@ -40,7 +40,7 @@ SpvUtilShaderDebug::SpvUtilShaderDebug(const Allocators &allocators, IL::Program
     allocators(allocators),
     program(program),
     table(table),
-    sourceMap(allocators) {
+    sourceMap(allocators, program) {
 
 }
 
@@ -56,6 +56,11 @@ void SpvUtilShaderDebug::Parse() {
 void SpvUtilShaderDebug::FinalizeSource() {
     // Finalize all sources
     sourceMap.Finalize();
+}
+
+void SpvUtilShaderDebug::FinalizeReverseSources() {
+    // Finalize all associations
+    sourceMap.FinalizeReverseAssociations();
 }
 
 void SpvUtilShaderDebug::ParseInstruction(SpvParseContext &ctx) {
@@ -115,7 +120,8 @@ void SpvUtilShaderDebug::ParseDebug100Instruction(SpvRecordReader &ctx) {
     ENSURE(ctx++ == extDebugInfo100, "Unexpected set index");
 
     // Handle instruction
-    switch (ctx++) {
+    uint32_t opCode = ctx++;
+    switch (opCode) {
         default: {
             break;
         }
@@ -151,13 +157,17 @@ void SpvUtilShaderDebug::ParseDebug100Instruction(SpvRecordReader &ctx) {
             break;
         }
     }
+    
+    // Common case
+    ParseDebug100InstructionCommon(ctx, opCode);
 }
 
 void SpvUtilShaderDebug::ParseDebug100FunctionInstruction(SpvParseContext &ctx, SpvSourceAssociation& sourceAssociation) {
     ENSURE(ctx++ == extDebugInfo100, "Unexpected set index");
 
     // Handle instruction
-    switch (ctx++) {
+    uint32_t opCode = ctx++;
+    switch (opCode) {
         default: {
             break;
         }
@@ -177,17 +187,124 @@ void SpvUtilShaderDebug::ParseDebug100FunctionInstruction(SpvParseContext &ctx, 
             }
             break;
         }
-
         case NonSemanticShaderDebugInfo100DebugNoLine: {
             sourceAssociation = {};
             break;
         }
     }
+    
+    // Common case
+    ParseDebug100InstructionCommon(ctx, opCode);
+}
+
+template<typename T>
+void SpvUtilShaderDebug::ParseDebug100InstructionCommon(T &ctx, uint32_t opCode) {
+    // Handle instruction
+    switch (opCode) {
+        default: {
+            break;
+        }
+        case NonSemanticShaderDebugInfo100DebugLocalVariable: {
+            SpvId name = ctx++;
+            SpvId type = ctx++;
+            SpvId source = ctx++;
+            SpvId line = ctx++;
+            SpvId column = ctx++;
+            SpvId parent = ctx++;
+            SpvId flags = ctx++;
+
+            // Declare type
+            SpvDebugVariableInfo &variableInfo = debugMap.variableInfos[ctx.GetResult()];
+            variableInfo.varId = ctx.GetResult();
+            variableInfo.nameId = name;
+            variableInfo.typeId = type;
+            break;
+        }
+        case NonSemanticShaderDebugInfo100DebugGlobalVariable: {
+            SpvId name = ctx++;
+            SpvId type = ctx++;
+            SpvId source = ctx++;
+            SpvId line = ctx++;
+            SpvId column = ctx++;
+            SpvId parent = ctx++;
+            SpvId linkedName = ctx++;
+            SpvId variable = ctx++;
+            SpvId flags = ctx++;
+
+            // Declare type
+            SpvDebugVariableInfo &variableInfo = debugMap.variableInfos[ctx.GetResult()];
+            variableInfo.varId = ctx.GetResult();
+            variableInfo.nameId = name;
+            variableInfo.typeId = type;
+
+            // Bind to debug variable
+            SpvDebugBindingInfo &bindingInfo = debugMap.bindingInfos[variable];
+            bindingInfo.debugVariable = ctx.GetResult();
+            break;
+        }
+        case NonSemanticShaderDebugInfo100DebugDeclare: {
+            SpvId debugVariable = ctx++;
+            SpvId variable = ctx++;
+            SpvId expression = ctx++;
+            
+            // Bind to debug variable
+            SpvDebugBindingInfo &bindingInfo = debugMap.bindingInfos[variable];
+            bindingInfo.debugVariable = debugVariable;
+            break;
+        }
+        case NonSemanticShaderDebugInfo100DebugValue: {
+            pendingInfo.anyState = true;
+            
+            InstructionValueInfo info;
+            info.debugVariableId = ctx++;
+            info.value = ctx++;
+            info.expression = ctx++;
+            info.accessIndices = std::span<const SpvId>(ctx.GetInstructionCode(), ctx.PendingWords());
+            pendingInfo.valueInfo.values.push_back(info);
+            break;
+        }
+        case NonSemanticShaderDebugInfo100DebugTypeBasic:
+        case NonSemanticShaderDebugInfo100DebugTypePointer:
+        case NonSemanticShaderDebugInfo100DebugTypeQualifier:
+        case NonSemanticShaderDebugInfo100DebugTypeArray:
+        case NonSemanticShaderDebugInfo100DebugTypeVector:
+        case NonSemanticShaderDebugInfo100DebugTypedef:
+        case NonSemanticShaderDebugInfo100DebugTypeFunction:
+        case NonSemanticShaderDebugInfo100DebugTypeEnum:
+        case NonSemanticShaderDebugInfo100DebugTypeComposite:
+        case NonSemanticShaderDebugInfo100DebugTypeMember:
+        case NonSemanticShaderDebugInfo100DebugTypeInheritance:
+        case NonSemanticShaderDebugInfo100DebugTypePtrToMember:
+        case NonSemanticShaderDebugInfo100DebugTypeTemplate:
+        case NonSemanticShaderDebugInfo100DebugTypeTemplateParameter:
+        case NonSemanticShaderDebugInfo100DebugTypeTemplateTemplateParameter:
+        case NonSemanticShaderDebugInfo100DebugTypeTemplateParameterPack:
+        case NonSemanticShaderDebugInfo100DebugTypeMatrix: {
+            debugMap.typeInfos[ctx.GetResult()] = SpvDebugTypeInfo {
+                .kind = static_cast<SpvOp>(opCode),
+                .operands = ctx.GetInstructionCode(),
+                .opCount = ctx.PendingWords()
+            };
+            break;
+        }
+    }
+}
+
+void SpvUtilShaderDebug::AddPendingAssociation(uint32_t codeOffset) {
+    ASSERT(pendingInfo.anyState, "Unexpected state");
+   
+    // Add value infos
+    if (!pendingInfo.valueInfo.values.empty()) {
+        debugMap.instructionValueInfos[codeOffset] = pendingInfo.valueInfo;
+    }
+    
+    // Cleanup
+    pendingInfo.valueInfo.values.clear();
 }
 
 void SpvUtilShaderDebug::CopyTo(SpvPhysicalBlockTable &remote, SpvUtilShaderDebug &out) {
     out.debugMap = debugMap;
-    out.sourceMap = sourceMap;
+    sourceMap.CopyTo(out.sourceMap);
 }
 
 SpvUtilShaderDebug::Debug100Metadata & SpvUtilShaderDebug::GetDebug100Metadata(SpvId id) {

@@ -24,10 +24,10 @@
 # ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 # 
 
-project(GPU-Reshape)
-
 # Requirements
 cmake_minimum_required(VERSION 3.24)
+
+project(GPU-Reshape)
 
 # Policies
 cmake_policy(SET CMP0135 NEW)
@@ -44,66 +44,71 @@ option(ENABLE_MIXED_COMPILER   "Enables mixed compiler building, separates build
 option(ENABLE_NUGET_RESTORE    "Enables nuget restore during configuration" ON)
 option(ENABLE_X86_BOOTSTRAPPER "Enables the x86 bootstrapper" ON)
 option(ENABLE_EXPERIMENTAL     "Enables experimental features" OFF)
+option(ENABLE_UNIT_TESTS       "Enables unit tests" OFF)
 
 # Developmental options
 option(ENABLE_DXIL_DUMP      "Enables DXIL dumping on shader builds" ON)
 option(ENABLE_ASAN           "Enables ASAN" OFF)
 option(ENABLE_RELEASE_DEBUG  "Enables debug information in release" ON)
 
+# Always compile single tasks with multiple processes
+add_compile_options($<$<CXX_COMPILER_ID:MSVC>:/MP>)
+
 # Primary build tree?
+set(ThinX86BuildDependency "")
 if (NOT THIN_X86_BUILD AND ENABLE_X86_BOOTSTRAPPER)
     # CMake binary / cache folder
     set(ThinBinaryDir "${CMAKE_BINARY_DIR}/ThinX86")
     execute_process(COMMAND ${CMAKE_COMMAND} -E make_directory "${ThinBinaryDir}")
+
+    set(UseThinX86Bootstrapper ON)
 
     # Architecture and bootstrapper
     if (NOT "${CMAKE_GENERATOR}" MATCHES "Ninja")
         # Let CMake handle the x86 architecture
         set(X86CommandBootstrapper ${CMAKE_COMMAND})
         set(X86ArchFlags           -A Win32 -DCMAKE_GENERATOR_PLATFORM=Win32)
-    else()
-        # Ninja (clang-cl) does not allow the platform / architecture to be supplied from command line
-        # It instead has to be supplied through environment flags, with the expected configuration set up,
-        # typical of vcvars.
-        set(X86CCLNinja            ${ThinBinaryDir}/CCLNinja86.bat)
-        set(X86CommandBootstrapper ${X86CCLNinja} ${CMAKE_COMMAND})
-        set(X86ArchFlags           -DTHIN_X86_M32=ON)
-
-        # Create cmake bootstrapper
-        configure_file(${CMAKE_SOURCE_DIR}/Build/Utils/CCLNinja86.bat.in ${X86CCLNinja})
-    endif()
-    
-    # Configuration target
-    # Note: I had great difficulty in getting the secondary-cmake targets to \DEPENDS on the sources, even
-    #       when explicitly marked. So, a terrible workaround is to increment the V[X] below, and reconfigure.
-    #       I'll find a proper solution at some point.
-    add_custom_target(
-        ThinX86Configure
-        COMMAND ${CMAKE_COMMAND} -E echo Configuring X86-V103
-        COMMAND ${X86CommandBootstrapper} -G "${CMAKE_GENERATOR}"
-            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-            -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+        set(X86CompilerFlags
             -DCMAKE_CXX_COMPILER="${CMAKE_CXX_COMPILER}"
             -DCMAKE_C_COMPILER="${CMAKE_C_COMPILER}"
-            -DTHIN_X86_BUILD=ON
-            -DTHIN_X86_POSTFIX=X32
-            -DENABLE_UIX=OFF
-            ${X86ArchFlags}
-            ${CMAKE_SOURCE_DIR}
-        WORKING_DIRECTORY "${ThinBinaryDir}"
-    )
-    
-    # Build target
-    add_custom_target(
-        ThinX86Build
-        COMMAND ${CMAKE_COMMAND} -E echo Building X86-V103
-        COMMAND ${X86CommandBootstrapper} --build . --config $<CONFIG>
-        DEPENDS ThinX86Configure ${path}
-        WORKING_DIRECTORY "${ThinBinaryDir}"
-    )
+        )
+    else()
+        message(WARNING "Disabling ENABLE_X86_BOOTSTRAPPER for Ninja builds. The ThinX86 sub-build requires a working 32-bit Visual Studio linker configuration, which is not currently provided by the Ninja path. Use a Visual Studio generator to build the x86 bootstrapper.")
+        set(UseThinX86Bootstrapper OFF)
+    endif()
 
-    # Dependency helper
-    set(ThinX86BuildDependency ThinX86Build)
+    if (UseThinX86Bootstrapper)
+        # Configuration target
+        # Note: I had great difficulty in getting the secondary-cmake targets to \DEPENDS on the sources, even
+        #       when explicitly marked. So, a terrible workaround is to increment the V[X] below, and reconfigure.
+        #       I'll find a proper solution at some point.
+        add_custom_target(
+            ThinX86Configure
+            COMMAND ${CMAKE_COMMAND} -E echo Configuring X86-V103
+            COMMAND ${X86CommandBootstrapper} -G "${CMAKE_GENERATOR}"
+                -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+                -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+                ${X86CompilerFlags}
+                -DTHIN_X86_BUILD=ON
+                -DTHIN_X86_POSTFIX=X32
+                -DENABLE_UIX=OFF
+                ${X86ArchFlags}
+                ${CMAKE_SOURCE_DIR}
+            WORKING_DIRECTORY "${ThinBinaryDir}"
+        )
+
+        # Build target
+        add_custom_target(
+            ThinX86Build
+            COMMAND ${CMAKE_COMMAND} -E echo Building X86-V103
+            COMMAND ${X86CommandBootstrapper} --build . --config $<CONFIG>
+            DEPENDS ThinX86Configure ${path}
+            WORKING_DIRECTORY "${ThinBinaryDir}"
+        )
+
+        # Dependency helper
+        set(ThinX86BuildDependency ThinX86Build)
+    endif()
 endif()
 
 # Ensure 64 bit

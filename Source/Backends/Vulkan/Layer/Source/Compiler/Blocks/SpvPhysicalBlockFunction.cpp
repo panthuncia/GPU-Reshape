@@ -176,6 +176,7 @@ void SpvPhysicalBlockFunction::ParseFunctionBody(IL::Function *function, SpvPars
         // Provide traceback
         if (basicBlock != nullptr) {
             sourceTraceback[source.codeOffset] = SpvCodeOffsetTraceback {
+                .functionID = function->GetID(),
                 .basicBlockID = basicBlock->GetID(),
                 .instructionIndex = basicBlock->GetCount()
             };
@@ -187,6 +188,11 @@ void SpvPhysicalBlockFunction::ParseFunctionBody(IL::Function *function, SpvPars
         // Create source association
         if (sourceAssociation) {
             table.shaderDebug.sourceMap.AddSourceAssociation(source.codeOffset, sourceAssociation);
+        }
+        
+        // Commit pending debug associations
+        if (table.shaderDebug.HasPendingAssociations()) {
+            table.shaderDebug.AddPendingAssociation(source.codeOffset);
         }
 
         // Handle instruction
@@ -607,7 +613,7 @@ void SpvPhysicalBlockFunction::ParseFunctionBody(IL::Function *function, SpvPars
                 // Fill cases
                 for (uint32_t i = 0; i < caseCount; i++) {
                     IL::SwitchCase _case;
-                    _case.literal = ctx++;
+                    _case.literal = program.GetConstants().UInt(ctx++)->id;
                     _case.branch = ctx++;
                     instr->cases[i] = _case;
                 }
@@ -1309,6 +1315,7 @@ void SpvPhysicalBlockFunction::CompileControlStructure(const SpvJob &job, const 
 bool SpvPhysicalBlockFunction::Compile(const SpvJob& job, SpvIdMap &idMap) {
     // Create data associations
     CreateDataResourceMap(job);
+    CreateDataBindingMap(job);
 
     // Create push constant data block
     table.typeConstantVariable.CreatePushConstantBlock(job);
@@ -2086,6 +2093,31 @@ bool SpvPhysicalBlockFunction::CompileBasicBlock(const SpvJob& job, SpvIdMap &id
                         spv[3] = varId;
                         break;
                     }
+                    case Backend::IL::KernelValue::PixelPosition: {
+                        const Backend::IL::Type *type = program.GetTypeMap().FindTypeOrAdd(Backend::IL::VectorType{
+                            .containedType = program.GetTypeMap().FindTypeOrAdd(Backend::IL::FPType{.bitWidth = 32}),
+                            .dimension = 4
+                        });
+
+                        IL::ID varId = table.typeConstantVariable.FindOrCreateInput(SpvBuiltInFragCoord, type);
+
+                        SpvInstruction &spv = stream.Allocate(SpvOpLoad, 4);
+                        spv[1] = table.typeConstantVariable.typeMap.GetSpvTypeId(resultType);
+                        spv[2] = kernel->result;
+                        spv[3] = varId;
+                        break;
+                    }
+                    case Backend::IL::KernelValue::VertexID: {
+                        const Backend::IL::Type *type = program.GetTypeMap().FindTypeOrAdd(Backend::IL::IntType{.bitWidth = 32, .signedness = false});
+
+                        IL::ID varId = table.typeConstantVariable.FindOrCreateInput(SpvBuiltInVertexIndex, type);
+
+                        SpvInstruction &spv = stream.Allocate(SpvOpLoad, 4);
+                        spv[1] = table.typeConstantVariable.typeMap.GetSpvTypeId(resultType);
+                        spv[2] = kernel->result;
+                        spv[3] = varId;
+                        break;
+                    }
                 }
                 break;
             }
@@ -2270,7 +2302,11 @@ bool SpvPhysicalBlockFunction::CompileBasicBlock(const SpvJob& job, SpvIdMap &id
 
                 for (uint32_t i = 0; i < _switch->cases.count; i++) {
                     const IL::SwitchCase& _case = _switch->cases[i];
-                    spv[3 + i * 2] = _case.literal;
+                    
+                    const IL::Constant* literal = program.GetConstants().GetConstant(_case.literal);
+                    ASSERT(literal && literal->Is<IL::IntConstant>(), "All literals must be constant");
+                    
+                    spv[3 + i * 2] = static_cast<uint32_t>(literal->As<IL::IntConstant>()->value);
                     spv[4 + i * 2] = _case.branch;
                 }
                 break;
@@ -2413,6 +2449,11 @@ bool SpvPhysicalBlockFunction::CompileBasicBlock(const SpvJob& job, SpvIdMap &id
             case IL::OpCode::ResourceToken: {
                 auto *token = instr.As<IL::ResourceTokenInstruction>();
                 table.shaderPRMT.GetToken(job, stream, fn.GetID(), idMap.Get(token->resource), token->result);
+                break;
+            }
+            case IL::OpCode::ExecutionInfo: {
+                auto *token = instr.As<IL::ExecutionInfoInstruction>();
+                table.shaderExecution.GetInfo(job, stream, token->result);
                 break;
             }
             case IL::OpCode::Alloca: {
@@ -3105,7 +3146,7 @@ void SpvPhysicalBlockFunction::CreateDataResourceMap(const SpvJob& job) {
         SpvInstruction &spvCounterSet = table.annotation.block->stream.Allocate(SpvOpDecorate, 4);
         spvCounterSet[1] = variable->id;
         spvCounterSet[2] = SpvDecorationDescriptorSet;
-        spvCounterSet[3] = job.instrumentationKey.pipelineLayoutUserSlots;
+        spvCounterSet[3] = job.instrumentationKey.global.descriptorSet;
 
         // Binding
         SpvInstruction &spvCounterBinding = table.annotation.block->stream.Allocate(SpvOpDecorate, 4);
@@ -3118,6 +3159,66 @@ void SpvPhysicalBlockFunction::CreateDataResourceMap(const SpvJob& job) {
 
         // Next!
         shaderDataOffset++;
+    }
+}
+
+void SpvPhysicalBlockFunction::CreateDataBindingMap(const SpvJob &job) {
+    // Get data map
+    IL::ShaderDataMap& shaderDataMap = program.GetShaderDataMap();
+
+    // Get IL map
+    Backend::IL::TypeMap &ilTypeMap = program.GetTypeMap();
+
+    // Current offset
+    uint32_t bindingOffset = 0;
+
+    // Emit all bindings
+    for (const ShaderDataInfo& info : shaderDataMap) {
+        if (!(info.type & ShaderDataType::BindingMask)) {
+            continue;
+        }
+
+        // Get variable
+        const Backend::IL::Variable* variable = shaderDataMap.Get(info.id);
+
+        // Variables always pointer to
+        const auto* pointerType = variable->type->As<Backend::IL::PointerType>();
+
+        // Only buffers supported for now
+        ASSERT(info.type == ShaderDataType::BufferBinding, "Only buffers are implemented for now");
+
+        // RWBuffer<uint>*
+        auto* bufferPtrType = ilTypeMap.FindTypeOrAdd(Backend::IL::PointerType{
+            .pointee =  pointerType->pointee->As<Backend::IL::BufferType>(),
+            .addressSpace = Backend::IL::AddressSpace::Resource,
+        });
+
+        // SpvIds
+        SpvId bufferPtrTypeId = table.typeConstantVariable.typeMap.GetSpvTypeId(bufferPtrType);
+
+        // Counter
+        SpvInstruction &spvCounterVar = table.typeConstantVariable.block->stream.Allocate(SpvOpVariable, 4);
+        spvCounterVar[1] = bufferPtrTypeId;
+        spvCounterVar[2] = variable->id;
+        spvCounterVar[3] = SpvStorageClassUniformConstant;
+
+        // Descriptor set
+        SpvInstruction &spvCounterSet = table.annotation.block->stream.Allocate(SpvOpDecorate, 4);
+        spvCounterSet[1] = variable->id;
+        spvCounterSet[2] = SpvDecorationDescriptorSet;
+        spvCounterSet[3] = job.instrumentationKey.bindings.descriptorSet;
+
+        // Binding
+        SpvInstruction &spvCounterBinding = table.annotation.block->stream.Allocate(SpvOpDecorate, 4);
+        spvCounterBinding[1] = variable->id;
+        spvCounterBinding[2] = SpvDecorationBinding;
+        spvCounterBinding[3] = bindingOffset;
+
+        // Add to all entry points
+        table.entryPoint.AddInterface(SpvStorageClassUniformConstant, variable->id);
+
+        // Next!
+        bindingOffset++;
     }
 }
 

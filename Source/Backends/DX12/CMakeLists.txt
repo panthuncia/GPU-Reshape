@@ -319,22 +319,28 @@ add_custom_command(
 )
 
 # Inbuilt modules
-Project_AddHLSL(GeneratedInbuilt cs_6_0 "-Od" Layer/Modules/InbuiltTemplateModule.hlsl Layer/Include/Backends/DX12/Modules/InbuiltTemplateModule kSPIRVInbuiltTemplateModule)
+Project_AddHLSL(GeneratedInbuilt cs_6_0 "-Od" Layer/Modules/InbuiltTemplateModule.hlsl Layer/Include/Backends/DX12/Modules/InbuiltTemplateModule kInbuiltTemplateModule)
+Project_AddHLSL(GeneratedInbuilt cs_6_0 "-O3" Layer/Modules/ShaderRecordPatching.hlsl Layer/Include/Backends/DX12/Modules/ShaderRecordPatching kShaderRecordPatching)
+Project_AddHLSL(GeneratedInbuilt cs_6_0 "-O3" Layer/Modules/RaytracingIndirectSetup.hlsl Layer/Include/Backends/DX12/Modules/RaytracingIndirectSetup kRaytracingIndirectSetup)
 
 # Create layer
 add_library(
     GRS.Backends.DX12.Layer SHARED
     Layer/Source/DXGIFactory.cpp
     Layer/Source/Device.cpp
+    Layer/Source/DeviceStateVote.cpp
+    Layer/Source/DeviceProperties.cpp
     Layer/Source/AMDAGS.cpp
     Layer/Source/Device11On12.cpp
     Layer/Source/Resource.cpp
     Layer/Source/Fence.cpp
     Layer/Source/CommandList.cpp
     Layer/Source/RootSignature.cpp
+    Layer/Source/Raytracing.cpp
     Layer/Source/DescriptorHeap.cpp
     Layer/Source/Pipeline.cpp
     Layer/Source/PipelineLibrary.cpp
+    Layer/Source/StateObject.cpp
     Layer/Source/SwapChain.cpp
     Layer/Source/MemoryHeap.cpp
     Layer/Source/QueryHeap.cpp
@@ -350,11 +356,13 @@ add_library(
     Layer/Source/Compiler/DXBC/DXBCPhysicalBlockScan.cpp
     Layer/Source/Compiler/DXBC/DXBCPhysicalBlockTable.cpp
     Layer/Source/Compiler/DXBC/DXBCUtils.cpp
+    Layer/Source/Compiler/DXBC/DXBCRDATRootSignature.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockShader.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockPipelineStateValidation.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockRootSignature.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockInputSignature.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockOutputSignature.cpp
+    Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockRuntimeData.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockFeatureInfo.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockDebug.cpp
     Layer/Source/Compiler/DXBC/Blocks/DXBCPhysicalBlockShaderSourceInfo.cpp
@@ -381,21 +389,29 @@ add_library(
     Layer/Source/Controllers/VersioningController.cpp
     Layer/Source/Controllers/FeatureController.cpp
     Layer/Source/Controllers/PDBController.cpp
+    Layer/Source/Controllers/ConfigController.cpp
     Layer/Source/Export/ExportHost.cpp
     Layer/Source/Export/ShaderExportFixedTwoSidedDescriptorAllocator.cpp
     Layer/Source/Export/ShaderExportStreamer.cpp
     Layer/Source/Export/ShaderExportStreamAllocator.cpp
     Layer/Source/Export/ShaderExportDescriptorLayout.cpp
     Layer/Source/Export/ShaderExportConstantAllocator.cpp
+    Layer/Source/Export/ShaderExportDeviceAllocator.cpp
+    Layer/Source/Export/ShaderExportOwnedHeapAllocator.cpp
     Layer/Source/Symbolizer/ShaderSGUIDHost.cpp
     Layer/Source/Allocation/DeviceAllocator.cpp
     Layer/Source/Resource/PhysicalResourceMappingTable.cpp
+    Layer/Source/Resource/VirtualAddressMappingTable.cpp
     Layer/Source/ShaderData/ShaderDataHost.cpp
+    Layer/Source/Programs/StateObjectPrograms.cpp
+    Layer/Source/Programs/Programs.cpp
     Layer/Source/Scheduler/Scheduler.cpp
     Layer/Source/IncrementalFence.cpp
     Layer/Source/ShaderProgram/ShaderProgramHost.cpp
     Layer/Source/Command/UserCommandBuffer.cpp
     Layer/Source/FeatureProxies.cpp
+    Layer/Source/IL/DeviceCommandEmitter.cpp
+    Layer/Source/IL/DebugEmitter.cpp
 
     # Generated source dependencies
     Layer/Source/DeepCopy.Gen.cpp
@@ -446,6 +462,9 @@ target_link_libraries(
     # d3d12
     d3d12.lib
     dxgi.lib
+
+    # Win32
+    $<$<PLATFORM_ID:Windows>:Dbghelp>
     
     # Generated source
 )
@@ -460,6 +479,12 @@ ExternalProject_Link(GRS.Backends.DX12.Layer D3D12MA $<$<CONFIG:Debug>:D3D12MAd>
 target_include_directories(
     GRS.Backends.DX12.Layer PUBLIC
     Layer/Include ${CMAKE_CURRENT_BINARY_DIR}/Layer/Include
+)
+
+# Private include directories
+target_include_directories(
+    GRS.Backends.DX12.Layer PRIVATE
+    Layer/Modules
 )
 
 #----- Service -----#

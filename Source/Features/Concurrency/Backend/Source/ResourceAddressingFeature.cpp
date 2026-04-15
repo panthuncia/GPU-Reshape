@@ -34,6 +34,10 @@
 #include <Backend/IL/TypeCommon.h>
 #include <Backend/IL/Emitters/ResourceTokenEmitter.h>
 #include <Backend/CommandContext.h>
+#include <Backend/IL/Instrumentation/ValidationCoverage.h>
+#include <Backend/IL/Instrumentation/Traceback.h>
+#include <Backend/ShaderData/ShaderDataValidationCoverage.h>
+#include <Backend/Command/CommandBuilder.h>
 
 // Generated schema
 #include <Schemas/Features/Concurrency.h>
@@ -68,11 +72,14 @@ bool ResourceAddressingConcurrencyFeature::Install() {
     lockBufferID = shaderDataHost->CreateBuffer(ShaderDataBufferInfo {
         .elementCount = 1u << Backend::IL::kResourceTokenPUIDBitCount,
         .format = Backend::IL::Format::R32UInt
-    });
+    }, "ResourceAddressing.LockBuffer");
 
     // Allocate event data
     //   ? Lightweight event data
     eventID = shaderDataHost->CreateEventData(ShaderDataEventInfo { });
+
+    // Coverage host buffers
+    dataValidationCoverage = registry->Get<ShaderDataValidationCoverage>();
 
     // OK
     return true;
@@ -99,6 +106,9 @@ void ResourceAddressingConcurrencyFeature::Inject(IL::Program &program, const Me
     // Options
     const SetInstrumentationConfigMessage config = CollapseOrDefault<SetInstrumentationConfigMessage>(specialization);
     
+    // Get the coverage id, if enabled
+    IL::ID coverageBufferID = IL::GetValidationCoverageBufferID(program, config, dataValidationCoverage);
+
     // Get the data ids
     IL::ID lockBufferDataID = program.GetShaderDataMap().Get(lockBufferID)->id;
     IL::ID eventDataID = program.GetShaderDataMap().Get(eventID)->id;
@@ -188,12 +198,18 @@ void ResourceAddressingConcurrencyFeature::Inject(IL::Program &program, const Me
             pre.NotEqual(previousLock, eventDataID)
         );
 
+        // If coverage, limit it
+        cond = IL::ApplyValidationCoverage(pre, coverageBufferID, sguid, cond);
+
         // If so, branch to failure, otherwise resume
         pre.BranchConditional(cond, oobBlock, resumeBlock, IL::ControlFlow::Selection(resumeBlock));
 
         // Out of bounds block
         IL::Emitter<> oob(program, *oobBlock);
         oob.AddBlockFlag(BasicBlockFlag::NoInstrumentation);
+
+        // If coverage, store it
+        IL::StoreValidationCoverage(oob, coverageBufferID, sguid);
 
         // Export the message
         ResourceRaceConditionMessage::ShaderExport msg;
@@ -212,6 +228,11 @@ void ResourceAddressingConcurrencyFeature::Inject(IL::Program &program, const Me
             msg.detail.coordinate[2] = zero;
             msg.detail.mip = zero;
             msg.detail.byteOffset = zero;
+        }
+            
+        // Write traceback data
+        if (config.traceback) {
+            IL::AppendTracebackChunk<ResourceRaceConditionMessage>(msg, oob);
         }
         
         // Export the message

@@ -36,6 +36,7 @@
 #include <Backend/IL/CapabilityTable.h>
 #include <Backend/IL/MetadataMap.h>
 #include <Backend/IL/Analysis/AnalysisMap.h>
+#include <Backend/IL/FeatureTable.h>
 
 // Std
 #include <list>
@@ -75,6 +76,7 @@ namespace IL {
 
             // Copy immutable
             program->capabilityTable = capabilityTable;
+            program->featureTable = featureTable;
             program->entryPoint = entryPoint;
 
             // Copy all functions and their basic blocks
@@ -95,6 +97,11 @@ namespace IL {
             entryPoint = id;
         }
 
+        /// Set the shader instrumentation hash
+        void SetShaderInstrumentationHash(uint64_t hash) {
+            shaderInstrumentationHash = hash;
+        }
+
         /// Get the entry point
         IL::Function* GetEntryPoint() const {
             return functions.GetFunction(entryPoint);
@@ -103,6 +110,12 @@ namespace IL {
         /// Get the shader guid
         uint64_t GetShaderGUID() const {
             return shaderGUID;
+        }
+
+        /// Get the shader instrumentation hash
+        /// Local to the shader itself, may not be mixed across different shaders
+        uint64_t GetShaderInstrumentationHash() const {
+            return shaderInstrumentationHash;
         }
 
         /// Get the identifier map
@@ -133,6 +146,11 @@ namespace IL {
         /// Get the capability table
         CapabilityTable& GetCapabilityTable() {
             return capabilityTable;
+        }
+
+        /// Get the feature table
+        FeatureTable& GetFeatureTable() {
+            return featureTable;
         }
 
         /// Get the metadata map
@@ -190,6 +208,11 @@ namespace IL {
             return capabilityTable;
         }
 
+        /// Get the feature table
+        const FeatureTable& GetFeatureTable() const {
+            return featureTable;
+        }
+
         /// Get the metadata map
         const MetadataMap& GetMetadataMap() const {
             return metadataMap;
@@ -229,6 +252,9 @@ namespace IL {
         /// The capability table
         CapabilityTable capabilityTable;
 
+        /// The feature table
+        FeatureTable featureTable;
+
         /// The metadata map
         MetadataMap metadataMap;
 
@@ -240,6 +266,10 @@ namespace IL {
 
         /// Shader guid of this program
         uint64_t shaderGUID{~0ull};
+
+        /// Instrumentation hash of this shader
+        /// Local to the shader itself, may not be mixed across different shaders
+        uint64_t shaderInstrumentationHash{~0ull};
 
     private:
         /// Internal registry

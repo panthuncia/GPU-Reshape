@@ -30,8 +30,14 @@
 #include <Backend/IL/ID.h>
 
 struct DXCodeOffsetTraceback {
+    /// Originating function
+    IL::ID functionID{IL::InvalidID};
+    
     /// Originating basic block
     IL::ID basicBlockID{IL::InvalidID};
+
+    /// Optional, instruction id, if any
+    IL::ID instructionID{IL::InvalidID};
 
     /// Instruction index in basic block
     uint32_t instructionIndex{~0u};

@@ -29,6 +29,16 @@
 #include <Backend/IL/Function.h>
 #include <Backend/IL/BasicBlock.h>
 
+// System
+#ifdef _MSC_VER
+#include <Windows.h>
+#endif // _MSC_VER
+
+// Std
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
 void IL::PrettyPrint(const Program &program, IL::PrettyPrintContext out) {
     out.Line() << "Program\n";
     out.Line() << "Bound     : " << program.GetIdentifierMap().GetMaxID() << "\n";
@@ -83,7 +93,13 @@ void IL::PrettyPrint(const Program *program, const Function &function, IL::Prett
 }
 
 void IL::PrettyPrint(const Program *program, const BasicBlock &basicBlock, IL::PrettyPrintContext out) {
-    out.Line() << "%" << basicBlock.GetID() << " = BasicBlock\n";
+    out.Line() << "%" << basicBlock.GetID() << " = BasicBlock";
+
+    if (const char* name = basicBlock.GetName()) {
+        out.stream << " '" << name << "'";
+    }
+
+    out.stream << "\n";
 
     // Print all instructions
     for (const IL::Instruction *instr: basicBlock) {
@@ -423,7 +439,7 @@ void IL::PrettyPrint(const Program *program, const Instruction *instr, IL::Prett
             for (uint32_t i = 0; i < _switch->cases.count; i++) {
                 const IL::SwitchCase &_case = _switch->cases[i];
                 line << "\n";
-                out.Line() << "       literal:" << _case.literal << " branch:%" << _case.branch;
+                out.Line() << "       literal:%" << _case.literal << " branch:%" << _case.branch;
             }
             break;
         }
@@ -525,6 +541,11 @@ void IL::PrettyPrint(const Program *program, const Instruction *instr, IL::Prett
         case OpCode::ResourceToken: {
             auto load = instr->As<IL::ResourceTokenInstruction>();
             line << "ResourceToken %" << load->resource;
+            break;
+        }
+        case OpCode::ExecutionInfo: {
+            auto info = instr->As<IL::ExecutionInfoInstruction>();
+            line << "ExecutionInfo";
             break;
         }
         case OpCode::Rem: {
@@ -1847,7 +1868,7 @@ void PrettyPrintJson(const IL::Program& program, const Backend::IL::Instruction*
             out.Line() << "\"Buffer\": " << store->buffer << ",";
             out.Line() << "\"Index\": " << store->index << ",";
             out.Line() << "\"Value\": " << store->value << ",";
-            out.Line() << "\"ComponentMask\": " << store->mask.value << ",";
+            out.Line() << "\"ComponentMask\": " << static_cast<uint32_t>(store->mask.value) << ",";
             break;
         }
         case IL::OpCode::StoreBufferRaw: {
@@ -1855,7 +1876,7 @@ void PrettyPrintJson(const IL::Program& program, const Backend::IL::Instruction*
             out.Line() << "\"Buffer\": " << store->buffer << ",";
             out.Line() << "\"Index\": " << store->index << ",";
             out.Line() << "\"Value\": " << store->value << ",";
-            out.Line() << "\"ComponentMask\": " << store->mask.value << ",";
+            out.Line() << "\"ComponentMask\": " << static_cast<uint32_t>(store->mask.value) << ",";
             out.Line() << "\"Alignment\": " << store->alignment << ",";
             break;
         }
@@ -2189,7 +2210,7 @@ void PrettyPrintJson(const IL::Program& program, const Backend::IL::Instruction*
             out.Line() << "\"Texture\": " << store->texture << ",";
             out.Line() << "\"Index\": " << store->index << ",";
             out.Line() << "\"Texel\": " << store->texel << ",";
-            out.Line() << "\"ComponentMask\": " << store->mask.value << ",";
+            out.Line() << "\"ComponentMask\": " << static_cast<uint32_t>(store->mask.value) << ",";
             break;
         }
         case IL::OpCode::Any: {
@@ -2216,7 +2237,7 @@ void PrettyPrintJson(const IL::Program& program, const Backend::IL::Instruction*
             auto load = instr->As<IL::LoadBufferRawInstruction>();
             out.Line() << "\"Buffer\": " << load->buffer << ",";
             out.Line() << "\"Index\": " << load->index << ",";
-            out.Line() << "\"ComponentMask\": " << load->mask.value << ",";
+            out.Line() << "\"ComponentMask\": " << static_cast<uint32_t>(load->mask.value) << ",";
             out.Line() << "\"Alignment\": " << load->alignment << ",";
 
             if (load->offset != IL::InvalidID) {
@@ -2232,6 +2253,9 @@ void PrettyPrintJson(const IL::Program& program, const Backend::IL::Instruction*
         case IL::OpCode::ResourceToken: {
             auto load = instr->As<IL::ResourceTokenInstruction>();
             out.Line() << "\"Resource\": " << load->resource << ",";
+            break;
+        }
+        case IL::OpCode::ExecutionInfo: {
             break;
         }
         case IL::OpCode::Rem: {
@@ -2429,6 +2453,7 @@ void PrettyPrintJson(const IL::Program& program, const Backend::IL::Instruction*
     }
     
     out.Line() << "\"OpCode\": " << static_cast<uint32_t>(instr->opCode) << ",";
+    out.Line() << "\"CodeOffset\": " << static_cast<uint32_t>(instr->source.codeOffset) << ",";
     
     if (const Backend::IL::Type* type = program.GetTypeMap().GetType(instr->result)) {
         out.Line() << "\"Type\": " << type->id << ",";
@@ -2589,4 +2614,44 @@ void IL::PrettyPrintProgramJson(const Program& program, PrettyPrintContext out) 
 
     // Close document
     out.Line() << "}";
+}
+
+void IL::Debug::PrettyPrintFile(const Program &program, const std::string &path) {
+    std::ofstream out(path);
+    if (!out.good()) {
+        return;
+    }
+
+    PrettyPrintContext context(out);
+    PrettyPrint(program, context);
+}
+
+void IL::Debug::PrettyPrintConsole(const Program &program) {
+#ifdef _MSC_VER
+    std::stringstream ss;
+    PrettyPrintContext context(ss);
+#else  // _MSC_VER
+    PrettyPrintContext context(std::cout);
+#endif  // _MSC_VER
+
+    PrettyPrint(program, context);
+    
+#ifdef _MSC_VER
+    OutputDebugStringA(ss.str().c_str());
+#endif // _MSC_VER
+}
+
+void IL::Debug::PrettyPrintConsole(const Program &program, const Instruction *instr) {
+#ifdef _MSC_VER
+    std::stringstream ss;
+    PrettyPrintContext context(ss);
+#else  // _MSC_VER
+    PrettyPrintContext context(std::cout);
+#endif  // _MSC_VER
+
+    PrettyPrint(&program, instr, context);
+    
+#ifdef _MSC_VER
+    OutputDebugStringA(ss.str().c_str());
+#endif // _MSC_VER
 }

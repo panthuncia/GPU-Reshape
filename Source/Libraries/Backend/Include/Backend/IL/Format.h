@@ -26,8 +26,11 @@
 
 #pragma once
 
+// Std
+#include <cstdint>
+
 namespace Backend::IL {
-    enum class Format {
+    enum class Format : uint8_t {
         None,
         RGBA32Float,
         RGBA16Float,
@@ -206,7 +209,7 @@ namespace Backend::IL {
             case Format::R8Snorm:
                 return 1;
             case Format::RGBA32Int:
-                return 46;
+                return 4;
             case Format::RGBA16Int:
                 return 4;
             case Format::RGBA8Int:

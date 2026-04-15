@@ -56,6 +56,6 @@
             </TextBlock.Text>
         </TextBlock>
         
-        <controls:BlockProgressBar x:Name="BlockBar" Width="100" Height="15" />
+        <controls:InstrumentationBlockProgressBar x:Name="BlockBar" Width="100" Height="15" />
     </StackPanel>
 </UserControl>

@@ -270,6 +270,10 @@ namespace IL {
         ID resource;
     };
 
+    struct ExecutionInfoInstruction : public Instruction {
+        static constexpr OpCode kOpCode = OpCode::ExecutionInfo;
+    };
+
     struct SampleTextureInstruction : public Instruction {
         static constexpr OpCode kOpCode = OpCode::SampleTexture;
 
@@ -539,10 +543,11 @@ namespace IL {
     };
 
     struct InsertInstruction : public Instruction {
-        static constexpr OpCode kOpCode = OpCode::Extract;
+        static constexpr OpCode kOpCode = OpCode::Insert;
 
         ID composite;
         ID value;
+        ID index;
     };
 
     struct SelectInstruction : public Instruction {
@@ -581,7 +586,7 @@ namespace IL {
     };
 
     struct SwitchCase {
-        uint32_t literal{0};
+        ID literal;
         ID branch;
     };
 
@@ -946,6 +951,8 @@ namespace IL {
                 return sizeof(ResourceSizeInstruction);
             case OpCode::ResourceToken:
                 return sizeof(ResourceTokenInstruction);
+            case OpCode::ExecutionInfo:
+                return sizeof(ExecutionInfoInstruction);
             case OpCode::Switch:
                 return static_cast<const SwitchInstruction*>(instruction)->GetSize();
             case OpCode::Phi:

@@ -24,13 +24,15 @@
 // ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
+using System;
 using ReactiveUI;
+using Runtime.ViewModels.Traits;
 using Studio.Models.Workspace.Listeners;
 using Studio.Models.Workspace.Objects;
 
 namespace Studio.ViewModels.Workspace.Objects
 {
-    public class ValidationObject : ReactiveObject
+    public class ValidationObject : ReactiveObject, ITextualSourceObject, ISerializable
     {
         /// <summary>
         /// Number of messages
@@ -44,7 +46,7 @@ namespace Studio.ViewModels.Workspace.Objects
         /// <summary>
         /// Severity of this validation object
         /// </summary>
-        public ValidationSeverity Severity
+        public SourceObjectSeverity Severity
         {
             get => _severity;
             set => this.RaiseAndSetIfChanged(ref _severity, value);
@@ -67,9 +69,18 @@ namespace Studio.ViewModels.Workspace.Objects
         }
 
         /// <summary>
+        /// Shader this breakpoint is assigned to
+        /// </summary>
+        public ShaderViewModel? ShaderViewModel
+        {
+            get => _shaderViewModel;
+            set => this.RaiseAndSetIfChanged(ref _shaderViewModel, value);
+        }
+
+        /// <summary>
         /// Associated detail view model, optional
         /// </summary>
-        public IValidationDetailViewModel? DetailViewModel
+        public ISourceObjectDetailViewModel? DetailViewModel
         {
             get => _detailViewModel;
             set => this.RaiseAndSetIfChanged(ref _detailViewModel, value);
@@ -94,6 +105,11 @@ namespace Studio.ViewModels.Workspace.Objects
         }
 
         /// <summary>
+        /// Assign to validation category
+        /// </summary>
+        public string OverlayCategory => "Validation";
+
+        /// <summary>
         /// General contents
         /// </summary>
         public string Extract => Segment?.Extract ?? string.Empty;
@@ -113,6 +129,27 @@ namespace Studio.ViewModels.Workspace.Objects
         public void NotifyCountChanged()
         {
             this.RaisePropertyChanged(nameof(Count));
+        }
+        
+        /// <summary>
+        /// Serialize this object
+        /// </summary>
+        public object Serialize()
+        {
+            return new SerializationMap()
+            {
+                { "Severity", Enum.GetName(Severity) },
+                { "Count", Count },
+                { "Content", Content },
+                { "Extract", Extract },
+                { "Segment", Segment?.Location },
+                
+                // Report detail if anything
+                {
+                    "Detail",
+                    (DetailViewModel as ISerializable)?.Serialize()
+                }
+            };
         }
 
         /// <summary>
@@ -138,7 +175,7 @@ namespace Studio.ViewModels.Workspace.Objects
         /// <summary>
         /// Internal detail view model
         /// </summary>
-        private IValidationDetailViewModel? _detailViewModel;
+        private ISourceObjectDetailViewModel? _detailViewModel;
 
         /// <summary>
         /// Internal traits
@@ -148,6 +185,11 @@ namespace Studio.ViewModels.Workspace.Objects
         /// <summary>
         /// Internal severity, assume error
         /// </summary>
-        private ValidationSeverity _severity = ValidationSeverity.Error;
+        private SourceObjectSeverity _severity = SourceObjectSeverity.Error;
+
+        /// <summary>
+        /// Internal shader
+        /// </summary>
+        private ShaderViewModel? _shaderViewModel;
     }
 }

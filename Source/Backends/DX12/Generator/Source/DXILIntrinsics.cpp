@@ -34,6 +34,7 @@
 // Std
 #include <sstream>
 #include <regex>
+#include <unordered_set>
 #include <string_view>
 
 namespace {
@@ -41,6 +42,61 @@ namespace {
         std::string name;
         std::string info;
     };
+
+    static const std::unordered_set<std::string_view> kInbuiltIntrinsicNames {
+        "DxOpRawBufferStoreI16"
+    };
+
+    static std::string_view TrimView(std::string_view view) {
+        const size_t begin = view.find_first_not_of(" \t\r\n");
+        if (begin == std::string_view::npos) {
+            return {};
+        }
+
+        const size_t end = view.find_last_not_of(" \t\r\n");
+        return view.substr(begin, end - begin + 1);
+    }
+
+    static std::string GetPrecedingCommentBlock(std::string_view text, size_t declarationOffset) {
+        std::string block;
+        size_t cursor = declarationOffset;
+        bool foundComment = false;
+
+        while (cursor > 0) {
+            size_t lineStart = text.rfind('\n', cursor - 1);
+            if (lineStart == std::string_view::npos) {
+                lineStart = 0;
+            } else {
+                lineStart += 1;
+            }
+
+            const std::string_view line = TrimView(text.substr(lineStart, cursor - lineStart));
+
+            if (line.empty()) {
+                if (foundComment) {
+                    break;
+                }
+            } else if (!line.starts_with(';')) {
+                break;
+            } else {
+                foundComment = true;
+
+                if (!block.empty()) {
+                    block.insert(0, "\n");
+                }
+
+                block.insert(0, line.data(), line.size());
+            }
+
+            if (lineStart == 0) {
+                break;
+            }
+
+            cursor = lineStart - 1;
+        }
+
+        return block;
+    }
 }
 
 /// Translate a given RST type into spec type
@@ -63,6 +119,8 @@ static std::string TranslateType(const std::string_view& type, std::string_view 
         return std::string(prefix) + "Void";
     } else if (type == "i64") {
         return std::string(prefix) + "I64";
+    } else if (type == "i16") {
+        return std::string(prefix) + "I16";
     } else if (type == "i32") {
         return std::string(prefix) + "I32";
     } else if (type == "f64") {
@@ -77,12 +135,20 @@ static std::string TranslateType(const std::string_view& type, std::string_view 
         return std::string(prefix) + "I1";
     } else if (type == "%dx.types.Handle") {
         return std::string(prefix) + "Handle";
+    } else if (type == "%dx.types.ResHandle") {
+        return std::string(prefix) + "Handle";
+    } else if (type == "%dx.types.SamplerHandle") {
+        return std::string(prefix) + "Handle";
     } else if (type == "%dx.types.Dimensions") {
         return std::string(prefix) + "Dimensions";
     } else if (type == "%dx.types.ResRet.f32") {
         return std::string(prefix) + "ResRetF32";
+    } else if (type == "%dx.types.ResRet.f16") {
+        return std::string(prefix) + "ResRetF16";
     } else if (type == "%dx.types.ResRet.i32") {
         return std::string(prefix) + "ResRetI32";
+    } else if (type == "%dx.types.ResRet.i16") {
+        return std::string(prefix) + "ResRetI16";
     } else if (type == "%dx.types.CBufRet.f32") {
         return std::string(prefix) + "CBufRetF32";
     } else if (type == "%dx.types.CBufRet.i32") {
@@ -97,13 +163,13 @@ static std::string TranslateType(const std::string_view& type, std::string_view 
 
 bool Generators::DXILIntrinsics(const GeneratorInfo &info, TemplateEngine &templateEngine) {
     std::stringstream intrinsics;
+    std::unordered_set<std::string> emittedNames;
 
     // Current UID
     uint32_t uid = 0;
 
     // Regex patterns
-    std::regex declarePattern("(\\:\\:)((\\s|(;.*$))*)declare (%?[A-Za-z.0-9]+) @([A-Za-z.0-9]+)\\(");
-    std::regex parameterPattern("\\s*(%?[A-Za-z0-9\\.]+)(,|\\))(\\s+; (.*))?$");
+    std::regex declarePattern("declare (%?[A-Za-z.0-9]+) @([A-Za-z.0-9]+)\\(");
     std::regex overloadPattern("(f64|f32|f16|i64|i32|i16|i8|i1)");
 
     // For all declarations
@@ -112,7 +178,7 @@ bool Generators::DXILIntrinsics(const GeneratorInfo &info, TemplateEngine &templ
         bool wasError = false;
 
         // Overload status
-        auto overloadStr = (*m)[2].str();
+        std::string overloadStr = GetPrecedingCommentBlock(info.dxilRST, static_cast<size_t>(m->position(0)));
 
         // All overloads
         std::vector<std::string> overloads;
@@ -131,7 +197,7 @@ bool Generators::DXILIntrinsics(const GeneratorInfo &info, TemplateEngine &templ
         }
 
         // Translate return type
-        std::string returnType = TranslateType((*m)[5].str());
+        std::string returnType = TranslateType((*m)[1].str());
         if (returnType.empty()) {
             continue;
         }
@@ -146,9 +212,9 @@ bool Generators::DXILIntrinsics(const GeneratorInfo &info, TemplateEngine &templ
             // Get name
             std::string name;
             if (overload == "") {
-                name = (*m)[6].str();
+                name = (*m)[2].str();
             } else {
-                name = (*m)[6].str();
+                name = (*m)[2].str();
 
                 // Remove default overload
                 name.erase(name.begin() + name.find_last_of('.') + 1, name.end());
@@ -200,16 +266,46 @@ bool Generators::DXILIntrinsics(const GeneratorInfo &info, TemplateEngine &templ
             std::vector<ParameterInfo> parameters;
 
             // For all parameters
-            for(std::sregex_iterator p = std::sregex_iterator(info.dxilRST.begin() + m->position() + m->length(), info.dxilRST.end(), parameterPattern); p != std::sregex_iterator(); p++) {
-                // Translate parameter type
-                std::string paramType = TranslateType((*p)[1].str());
+            size_t parameterOffset = static_cast<size_t>(m->position(0) + m->length(0));
+            const size_t firstLineEnd = info.dxilRST.find('\n', parameterOffset);
+            const size_t firstLineLength = (firstLineEnd == std::string::npos ? info.dxilRST.length() : firstLineEnd) - parameterOffset;
+            const std::string_view firstLine = TrimView(std::string_view(info.dxilRST).substr(parameterOffset, firstLineLength));
+
+            // Skip shorthand example declarations such as declare foo(...)
+            if (firstLine.starts_with("...")) {
+                continue;
+            }
+
+            while (parameterOffset < info.dxilRST.length()) {
+                size_t lineEnd = info.dxilRST.find('\n', parameterOffset);
+                if (lineEnd == std::string::npos) {
+                    lineEnd = info.dxilRST.length();
+                }
+
+                std::string_view line = TrimView(std::string_view(info.dxilRST).substr(parameterOffset, lineEnd - parameterOffset));
+                parameterOffset = lineEnd + 1;
+
+                if (line.empty()) {
+                    continue;
+                }
+
+                const size_t terminalPos = line.find_first_of(",)");
+                if (terminalPos == std::string_view::npos) {
+                    break;
+                }
+
+                std::string paramType = TranslateType(TrimView(line.substr(0, terminalPos)));
                 if (paramType.empty()) {
                     wasError = true;
                     break;
                 }
 
                 // Get info
-                std::string paramInfo = (*p)[4].str();
+                std::string paramInfo;
+                const size_t commentPos = line.find(';');
+                if (commentPos != std::string_view::npos) {
+                    paramInfo = std::string(TrimView(line.substr(commentPos + 1)));
+                }
 
                 // Extremely crude overload deduction
                 if (paramInfo.find("value") != std::string::npos) {
@@ -223,13 +319,23 @@ bool Generators::DXILIntrinsics(const GeneratorInfo &info, TemplateEngine &templ
                 });
 
                 // End of intrinsic?
-                if ((*p)[2].str() == ")") {
+                if (line[terminalPos] == ')') {
                     break;
                 }
             }
 
             // Failed parsing?
             if (wasError) {
+                continue;
+            }
+
+            // Skip intrinsics that are already maintained in the inbuilt header.
+            if (kInbuiltIntrinsicNames.contains(keyName)) {
+                continue;
+            }
+
+            // DXIL.rst contains both examples and formal signatures. Skip duplicate declarations.
+            if (!emittedNames.insert(keyName).second) {
                 continue;
             }
 

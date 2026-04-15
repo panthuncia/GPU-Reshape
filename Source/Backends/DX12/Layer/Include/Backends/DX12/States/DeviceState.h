@@ -42,6 +42,7 @@
 #include <Backend/Environment.h>
 #include <Backend/EventDataStack.h>
 #include <Backend/Device/VendorType.h>
+#include <Backend/Device/DeviceCapabilityTable.h>
 
 // Bridge
 #include <Bridge/Log/LogBuffer.h>
@@ -60,11 +61,13 @@ struct ShaderState;
 struct CommandQueueState;
 struct ResourceState;
 struct PipelineState;
+struct Programs;
 class InstrumentationController;
 class FeatureController;
 class MetadataController;
 class VersioningController;
 class PDBController;
+class ConfigController;
 class IBridge;
 class ShaderExportHost;
 class ShaderDataHost;
@@ -73,6 +76,7 @@ class ShaderSGUIDHost;
 class QueueSegmentAllocator;
 class DeviceAllocator;
 class ShaderProgramHost;
+class VirtualAddressMappingTable;
 class Scheduler;
 
 struct __declspec(uuid("548FDFD6-37E2-461C-A599-11DA5290F06E")) DeviceState {
@@ -145,6 +149,9 @@ struct __declspec(uuid("548FDFD6-37E2-461C-A599-11DA5290F06E")) DeviceState {
     /// Sorted virtual address table
     ResourceVirtualAddressTable virtualAddressTable;
 
+    /// Device virtual address mapping table
+    ComRef<VirtualAddressMappingTable> virtualAddressMappingTable;
+    
     /// Physical identifier map
     PhysicalResourceIdentifierMap physicalResourceIdentifierMap;
 
@@ -157,9 +164,13 @@ struct __declspec(uuid("548FDFD6-37E2-461C-A599-11DA5290F06E")) DeviceState {
     ComRef<MetadataController> metadataController{nullptr};
     ComRef<VersioningController> versioningController{nullptr};
     ComRef<PDBController> pdbController{nullptr};
+    ComRef<ConfigController> configController{nullptr};
 
     /// User programs
     ComRef<ShaderProgramHost> shaderProgramHost{nullptr};
+
+    /// Internal programs
+    Programs* programs{nullptr};
 
     /// Shared remapping table
     EventDataStack::RemappingTable eventRemappingTable;
@@ -168,11 +179,18 @@ struct __declspec(uuid("548FDFD6-37E2-461C-A599-11DA5290F06E")) DeviceState {
     /// Pre-populated proxies
     ID3D12GraphicsCommandListFeatureProxies commandListProxies;
 
+    /// A rolling execution counter, wrap arounds are expected
+    /// TOOD[dbg]: Let's avoid polluting the shared state
+    std::atomic<uint32_t> rollingUIDs{0};
+
     /// Shared logging buffer
-    LogBuffer logBuffer;
+    ComRef<LogBuffer> logBuffer;
 
     /// Optional environment, ignored if creation parameters supply a registry
     Backend::Environment environment;
+    
+    /// Shared capabilities
+    DeviceCapabilityTable capabilityTable;
 
     /// Current SDK
     D3D12GPUOpenSDKRuntime sdk;

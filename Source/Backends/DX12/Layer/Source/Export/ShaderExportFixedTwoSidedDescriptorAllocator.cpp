@@ -32,6 +32,7 @@
 
 // Std
 #include <algorithm>
+#include <set>
 
 ShaderExportFixedTwoSidedDescriptorAllocator::ShaderExportFixedTwoSidedDescriptorAllocator(ID3D12Device *device, ID3D12DescriptorHeap *heap, uint32_t lhsWidth, uint32_t rhsWidth, uint32_t offset, uint32_t bound) : bound(bound), heap(heap) {
     // Get the advance
@@ -80,7 +81,9 @@ ShaderExportFixedTwoSidedDescriptorAllocator::AllocationBucket & ShaderExportFix
     return width == lhsBucket.width ? rhsBucket : lhsBucket;
 }
 
-ShaderExportSegmentDescriptorInfo ShaderExportFixedTwoSidedDescriptorAllocator::Allocate(uint32_t width) {
+ShaderExportSegmentDescriptorInfo ShaderExportFixedTwoSidedDescriptorAllocator::Allocate(uint32_t width, ShaderExportStreamState* debugOwner, bool fatalOnExhaust) {
+    std::lock_guard guard(mutex);
+    
     AllocationBucket& bucket = GetForwardBucket(width);
     
     // Any free'd?
@@ -97,12 +100,19 @@ ShaderExportSegmentDescriptorInfo ShaderExportFixedTwoSidedDescriptorAllocator::
         info.offset = id;
         info.cpuHandle.ptr = bucket.cpuHandle.ptr + info.offset * bucket.descriptorAdvance;
         info.gpuHandle.ptr = bucket.gpuHandle.ptr + info.offset * bucket.descriptorAdvance;
+#if HEAP_ALLOCATOR_TRACK_OWNER
+        info.debugOwner = debugOwner;
+#endif // HEAP_ALLOCATOR_TRACK_OWNER
         
         // Rhs space is shifted by the width
         if (bucket.descriptorAdvance < 0) {
             info.cpuHandle.ptr += width * bucket.descriptorAdvance;
             info.gpuHandle.ptr += width * bucket.descriptorAdvance;
         }
+
+#if HEAP_ALLOCATOR_TRACK_OWNER
+        segments.push_back(info);
+#endif // HEAP_ALLOCATOR_TRACK_OWNER
 
         // OK
         return info;
@@ -111,10 +121,30 @@ ShaderExportSegmentDescriptorInfo ShaderExportFixedTwoSidedDescriptorAllocator::
     // Out of descriptors?
     if (lhsBucket.slotAllocationCounter + rhsBucket.slotAllocationCounter + width > bound) {
         // Display friendly message
-        Backend::DiagnosticFatal(
-            "Two-Sided Descriptor Exhaustion",
-            "GPU Reshape has run out internal descriptors for command list patching. Please report this issue."
-        );
+        if (fatalOnExhaust) {
+#if HEAP_ALLOCATOR_TRACK_OWNER
+            // Determine the total number of live states
+            std::set<ShaderExportStreamState*> owners;
+            for (const ShaderExportSegmentDescriptorInfo& segment : segments) {
+                if (segment.debugOwner) {
+                    owners.insert(segment.debugOwner);
+                }
+            }
+            
+            const std::string detail = Format(
+                "A total of {0} recorded command lists (inc. internal), with {1} descriptor TSA entries",
+                owners.size(), segments.size()
+            );
+#else // HEAP_ALLOCATOR_TRACK_OWNER
+            const std::string detail = "Exceeded TSA allocation bounds, compile with HEAP_ALLOCATOR_TRACK_OWNER for more details.";
+#endif // HEAP_ALLOCATOR_TRACK_OWNER
+            
+            Backend::DiagnosticFatal(
+                "Two-Sided Descriptor Exhaustion",
+                "GPU Reshape has run out internal descriptors for command list patching. Please report this issue.\n\n{0}",
+                detail
+            );
+        }
 
         // Unreachable
         return {};
@@ -129,12 +159,19 @@ ShaderExportSegmentDescriptorInfo ShaderExportFixedTwoSidedDescriptorAllocator::
     info.offset = bucket.slotAllocationCounter;
     info.cpuHandle.ptr = bucket.cpuHandle.ptr + info.offset * bucket.descriptorAdvance;
     info.gpuHandle.ptr = bucket.gpuHandle.ptr + info.offset * bucket.descriptorAdvance;
+#if HEAP_ALLOCATOR_TRACK_OWNER
+    info.debugOwner = debugOwner;
+#endif // HEAP_ALLOCATOR_TRACK_OWNER
 
     // Rhs space is shifted by the width
     if (bucket.descriptorAdvance < 0) {
         info.cpuHandle.ptr += width * bucket.descriptorAdvance;
         info.gpuHandle.ptr += width * bucket.descriptorAdvance;
     }
+
+#if HEAP_ALLOCATOR_TRACK_OWNER
+    segments.push_back(info);
+#endif // HEAP_ALLOCATOR_TRACK_OWNER
 
     // Advance
     bucket.slotAllocationCounter += width;
@@ -159,12 +196,21 @@ ShaderExportSegmentDescriptorInfo ShaderExportFixedTwoSidedDescriptorAllocator::
 }
 
 void ShaderExportFixedTwoSidedDescriptorAllocator::Free(const ShaderExportSegmentDescriptorInfo& id) {
+    std::lock_guard guard(mutex);
+    
     AllocationBucket& bucket = GetForwardBucket(id.width);
 
     // Validate
 #ifndef NDEBUG
     ASSERT(id.heap == heap, "Mismatched heap in shader export descriptor free");
 #endif // NDEBUG
+
+#if HEAP_ALLOCATOR_TRACK_OWNER
+    // Remove from tracked, debugging only
+    segments.erase(std::ranges::remove_if(segments, [&](const ShaderExportSegmentDescriptorInfo& entry) {
+        return entry.offset == id.offset;
+    }).begin(), segments.end());
+#endif // HEAP_ALLOCATOR_TRACK_OWNER
 
     // Append as free, insert sorted
     bucket.freeDescriptors.insert(std::upper_bound(bucket.freeDescriptors.begin(), bucket.freeDescriptors.end(), id.offset), id.offset);

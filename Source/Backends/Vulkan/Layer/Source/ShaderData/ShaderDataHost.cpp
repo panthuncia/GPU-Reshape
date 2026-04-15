@@ -24,13 +24,20 @@
 // ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // 
 
-#include "Backend/ShaderData/ShaderDataType.h"
 #include <Backends/Vulkan/ShaderData/ShaderDataHost.h>
 #include <Backends/Vulkan/Allocation/DeviceAllocator.h>
 #include <Backends/Vulkan/Tables/DeviceDispatchTable.h>
 #include <Backends/Vulkan/Translation.h>
-#include <algorithm>
+
+// Backend
+#include <Backend/ShaderData/ShaderDataType.h>
+#include <Backend/ShaderData/ShaderDataValidationCoverage.h>
+
+// Vulkan
 #include <vulkan/vulkan_core.h>
+
+// Std
+#include <algorithm>
 
 ShaderDataHost::ShaderDataHost(DeviceDispatchTable *table) : table(table) {
 
@@ -60,7 +67,12 @@ bool ShaderDataHost::Install() {
 
     // Fill capability table
     capabilityTable.supportsTiledResources = table->physicalDeviceFeatures.features.sparseResidencyBuffer;
-    capabilityTable.bufferMaxElementCount = table->physicalDeviceProperties.limits.maxTexelBufferElements;
+    capabilityTable.bufferMaxElementCount = table->physicalDeviceProperties.properties.limits.maxTexelBufferElements;
+    capabilityTable.bufferMaxSize = table->physicalDeviceMaintenance4Properties.maxBufferSize;
+
+    // Install coverage support
+    ComRef coverage = registry->AddNew<ShaderDataValidationCoverage>();
+    coverage->Install();
 
     // OK
     return true;
@@ -80,6 +92,10 @@ void ShaderDataHost::CreateDescriptors(VkDescriptorSet set, uint32_t bindingOffs
             continue;
         }
 
+        if (resources[i].isNonDescriptor) {
+            continue;
+        }
+        
         // Handle type
         switch (entry.info.type) {
             default: {
@@ -107,7 +123,7 @@ void ShaderDataHost::CreateDescriptors(VkDescriptorSet set, uint32_t bindingOffs
     table->next_vkUpdateDescriptorSets(table->object, static_cast<uint32_t>(descriptorWrites.Size()), descriptorWrites.Data(), 0, nullptr);
 }
 
-ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
+ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info, const char* name) {
     std::lock_guard guard(mutex);
     
     // Determine index
@@ -130,6 +146,7 @@ ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
     entry.info.id = rid;
     entry.info.type = ShaderDataType::Buffer;
     entry.info.buffer = info;
+    entry.isNonDescriptor = info.flagSet & ShaderDataBufferFlag::Host;
 
     // Buffer info
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -140,6 +157,11 @@ ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
     // If tiled, append flags
     if (info.flagSet & ShaderDataBufferFlag::Tiled) {
         bufferInfo.flags |= VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+    }
+    
+    // If predicated, append usage
+    if (info.flagSet & ShaderDataBufferFlag::Predicate) {
+        bufferInfo.usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
     }
 
     // Attempt to create the buffer
@@ -152,8 +174,18 @@ ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
 
     // If not tiled, immediately bind memory
     if (!(info.flagSet & ShaderDataBufferFlag::Tiled)) {
+        // Translate the residency
+        AllocationResidency residency;
+        if (entry.isNonDescriptor) {
+            residency = AllocationResidency::Host;
+        } else if (info.flagSet & ShaderDataBufferFlag::HostVisible) {
+            residency = AllocationResidency::HostVisible;
+        } else {
+            residency = AllocationResidency::Device;
+        }
+        
         // Create the allocation
-        entry.allocation = deviceAllocator->Allocate(entry.memoryRequirements, info.flagSet & ShaderDataBufferFlag::HostVisible ? AllocationResidency::HostVisible : AllocationResidency::Device);
+        entry.allocation = deviceAllocator->Allocate(entry.memoryRequirements, residency);
 
         // Bind against the allocation
         deviceAllocator->BindBuffer(entry.allocation, entry.buffer);
@@ -169,6 +201,38 @@ ShaderDataID ShaderDataHost::CreateBuffer(const ShaderDataBufferInfo &info) {
     if (table->next_vkCreateBufferView(table->object, &viewInfo, nullptr, &entry.view) != VK_SUCCESS) {
         return InvalidShaderDataID;
     }
+
+    // OK
+    return rid;
+}
+
+ShaderDataID ShaderDataHost::CreateBufferBinding(const ShaderProgramID& programID, const ShaderDataBufferBindingInfo &info) {
+    std::lock_guard guard(mutex);
+
+    // Determine index
+    ShaderDataID rid;
+    if (freeIndices.empty()) {
+        // Allocate at end
+        rid = static_cast<uint32_t>(indices.size());
+        indices.emplace_back();
+    } else {
+        // Consume free index
+        rid = freeIndices.back();
+        freeIndices.pop_back();
+    }
+
+    // Set index
+    indices[rid] = static_cast<uint32_t>(resources.size());
+
+    // Create allocation
+    ResourceEntry &entry = resources.emplace_back();
+    entry.info.id = rid;
+    entry.info.type = ShaderDataType::BufferBinding;
+    entry.info.bufferBinding = info;
+
+    // Append binding
+    ProgramEntry& program = programs[programID];
+    program.shaderDataIDs.push_back(rid);
 
     // OK
     return rid;
@@ -243,6 +307,15 @@ void *ShaderDataHost::Map(ShaderDataID rid) {
     return deviceAllocator->Map(entry.allocation);
 }
 
+void ShaderDataHost::Unmap(ShaderDataID rid, void *mapped) {
+    std::lock_guard guard(mutex);
+    uint32_t index = indices[rid];
+
+    // Entry to map
+    ResourceEntry &entry = resources[index];
+    deviceAllocator->Unmap(entry.allocation);
+}
+
 ShaderDataMappingID ShaderDataHost::CreateMapping(ShaderDataID data, uint64_t tileCount) {
     std::lock_guard guard(mutex);
     
@@ -294,6 +367,24 @@ void ShaderDataHost::FlushMappedRange(ShaderDataID rid, size_t offset, size_t le
     deviceAllocator->FlushMappedRange(entry.allocation, offset, length);
 }
 
+uint32_t ShaderDataHost::GetBindingIndex(ShaderProgramID programID, ShaderDataID rid) {
+    std::lock_guard guard(mutex);
+
+    // Get program
+    ASSERT(programs.contains(programID), "Program not registered");
+    ProgramEntry& program = programs[programID];
+
+    // Find the index of the RID
+    for (uint32_t i = 0; i < program.shaderDataIDs.size(); i++) {
+        if (program.shaderDataIDs[i] == rid) {
+            return i;
+        }
+    }
+
+    ASSERT(false, "Shader data not registered");
+    return InvalidShaderDataID;
+}
+
 VkBuffer ShaderDataHost::GetResourceBuffer(ShaderDataID rid) {
     std::lock_guard guard(mutex);
     uint32_t index = indices[rid];
@@ -304,6 +395,19 @@ VkBuffer ShaderDataHost::GetResourceBuffer(ShaderDataID rid) {
 
     // OK
     return entry.buffer;
+}
+
+VkBufferView ShaderDataHost::GetResourceBufferView(ShaderDataID rid, VkFormat format) {
+    std::lock_guard guard(mutex);
+    uint32_t index = indices[rid];
+
+    // Entry to map
+    ResourceEntry &entry = resources[index];
+    ASSERT(entry.info.type == ShaderDataType::Buffer, "Invalid resource");
+
+    // OK
+    ASSERT(format == VK_FORMAT_R32_UINT, "Unsupported format");
+    return entry.view;
 }
 
 VmaAllocation ShaderDataHost::GetMappingAllocation(ShaderDataMappingID mid) {
@@ -343,13 +447,17 @@ void ShaderDataHost::Destroy(ShaderDataID rid) {
     freeIndices.push_back(rid);
 }
 
-void ShaderDataHost::Enumerate(uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) {
+void ShaderDataHost::EnumerateShader(uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) {
     std::lock_guard guard(mutex);
     
     if (out) {
         uint32_t offset = 0;
 
         for (uint32_t i = 0; i < resources.size(); i++) {
+            if (resources[i].isNonDescriptor) {
+                continue;
+            }
+            
             if (mask & resources[i].info.type) {
                 out[offset++] = resources[i].info;
             }
@@ -358,7 +466,48 @@ void ShaderDataHost::Enumerate(uint32_t *count, ShaderDataInfo *out, ShaderDataT
         uint32_t value = 0;
 
         for (uint32_t i = 0; i < resources.size(); i++) {
+            if (resources[i].isNonDescriptor) {
+                continue;
+            }
+            
             if (mask & resources[i].info.type) {
+                value++;
+            }
+        }
+
+        *count = value;
+    }
+}
+
+void ShaderDataHost::EnumerateProgram(ShaderProgramID programID, uint32_t *count, ShaderDataInfo *out, ShaderDataTypeSet mask) {
+    std::lock_guard guard(mutex);
+
+    // Find the program
+    auto it = programs.find(programID);
+    if (it == programs.end()) {
+        *count = 0;
+        return;
+    }
+    
+    if (out) {
+        uint32_t offset = 0;
+
+        for (uint32_t i = 0; i < it->second.shaderDataIDs.size(); i++) {
+            const ResourceEntry& resource = resources[indices[it->second.shaderDataIDs[i]]];
+
+            // Is of type?
+            if (mask & resource.info.type) {
+                out[offset++] = resource.info;
+            }
+        }
+    } else {
+        uint32_t value = 0;
+
+        for (uint32_t i = 0; i < it->second.shaderDataIDs.size(); i++) {
+            const ResourceEntry& resource = resources[indices[it->second.shaderDataIDs[i]]];
+            
+            // Is of type?
+            if (mask & resource.info.type) {
                 value++;
             }
         }

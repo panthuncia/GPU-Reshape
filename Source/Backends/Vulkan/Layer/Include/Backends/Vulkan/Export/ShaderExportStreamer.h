@@ -33,6 +33,7 @@
 // Layer
 #include <Backends/Vulkan/Vulkan.h>
 #include <Backends/Vulkan/Export/StreamState.h>
+#include <Backends/Vulkan/Export/ShaderExportFreeDescriptorAllocator.h>
 #include <Backends/Vulkan/Resource/DescriptorDataSegment.h>
 
 // Common
@@ -54,6 +55,7 @@ struct FenceState;
 struct QueueState;
 struct CommandBufferObject;
 struct DescriptorSetState;
+struct ExecutionInfo;
 class IBridge;
 
 class ShaderExportStreamer : public TComponent<ShaderExportStreamer> {
@@ -98,7 +100,13 @@ public:
     /// \param queueState the queue to record for
     /// \param state the segment state
     /// \return command buffer to be submitted
-    VkCommandBuffer RecordPostCommandBuffer(ShaderExportQueueState* queueState, ShaderExportStreamSegment* state);
+    VkCommandBuffer BeginRecordPostCommandBuffer(ShaderExportQueueState* queueState, ShaderExportStreamSegment* state);
+
+    /// Record a patch command buffer for submissions
+    /// \param queueState the queue to record for
+    /// \param state the segment state
+    /// \return command buffer to be submitted
+    void EndRecordPostCommandBuffer(ShaderExportQueueState* queueState, ShaderExportStreamSegment* state);
 
     /// Enqueue a submitted segment
     /// \param queue the queue state that was submitted on
@@ -125,9 +133,9 @@ public:
     /// \param state the stream state
     /// \param pipeline the pipeline state being bound
     /// \param object the backend state being bound
-    /// \param instrumented true if an instrumented pipeline has been bound
+    /// \param instrument the pipeline instrument, optional
     /// \param commandBuffer the command buffer
-    void BindPipeline(ShaderExportStreamState* state, const PipelineState* pipeline, VkPipeline object, bool instrumented, VkCommandBuffer commandBuffer);
+    void BindPipeline(ShaderExportStreamState* state, const PipelineState* pipeline, VkPipeline object, PipelineInstrument* instrument, VkCommandBuffer commandBuffer);
 
     /// Invoked during descriptor binding
     /// \param state the stream state
@@ -162,6 +170,13 @@ public:
     /// \param segment the segment to be mapped to
     void MapSegment(ShaderExportStreamState* state, ShaderExportStreamSegment* segment);
 
+    /// Set the execution info
+    /// @param state the stream state
+    /// @param commandBuffer the target command buffer
+    /// @param type the pipeline type to bind for
+    /// @param executionInfo the execution info to set
+    void SetExecutionInfo(ShaderExportStreamState* state, VkCommandBuffer commandBuffer, PipelineType type, const ExecutionInfo& executionInfo);
+    
     /// Commit all data
     /// \param state state to be committed to
     /// \param bindPoint destination binding point
@@ -190,6 +205,13 @@ public:
     void Process(ShaderExportQueueState* queueState);
 
 private:
+#ifndef NDEBUG
+    /// Process all streaming debug chunks
+    /// \param state the stream state
+    void ProcessStreamDebug(ShaderExportStreamState* state);
+#endif // NDEBUG
+
+private:
     /// Migrate the descriptor environment to a new pipeline state
     /// \param state the stream state
     /// \param pipeline the new pipeline
@@ -205,6 +227,12 @@ private:
 
     /// Free a segment
     void FreeSegmentNoQueueLock(ShaderExportQueueState* queue, ShaderExportStreamSegment* segment);
+
+    /// Free a constant allocator
+    void FreeConstantAllocator(ShaderExportConstantAllocator& allocator);
+
+    /// Free a device allocator
+    void FreeDeviceAllocator(ShaderExportDeviceAllocator& allocator);
 
     /// Release a descriptor data segment
     void ReleaseDescriptorDataSegment(const DescriptorDataSegment& dataSegment);
@@ -225,6 +253,13 @@ private:
 
     /// All free descriptor segments
     std::vector<DescriptorDataSegmentEntry> freeDescriptorDataSegmentEntries;
+
+    /// All free allocators
+    std::vector<ShaderExportConstantAllocator> freeConstantAllocators;
+    std::vector<ShaderExportDeviceAllocator> freeDeviceAllocators;
+
+    /// Shared allocators
+    ShaderExportFreeDescriptorAllocator freeDescriptorAllocator;
 
     /// All components
     ComRef<DeviceAllocator> deviceAllocator{nullptr};

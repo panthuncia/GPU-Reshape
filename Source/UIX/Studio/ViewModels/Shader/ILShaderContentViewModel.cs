@@ -25,28 +25,32 @@
 // 
 
 using System;
+using System.Collections.ObjectModel;
 using System.Windows.Input;
 using Avalonia.Media;
 using ReactiveUI;
+using Runtime.Utils.Workspace;
 using Runtime.ViewModels.IL;
 using Runtime.ViewModels.Shader;
 using Runtime.ViewModels.Traits;
 using Studio.Models.Workspace.Objects;
 using Studio.Services;
+using Studio.ViewModels.Controls;
 using Studio.ViewModels.Documents;
 using Studio.ViewModels.Workspace.Objects;
 using Studio.ViewModels.Workspace.Services;
 using Studio.ViewModels.Workspace.Properties;
+using ShaderViewModel = Studio.ViewModels.Workspace.Objects.ShaderViewModel;
 
 namespace Studio.ViewModels.Shader
 {
-    public class ILShaderContentViewModel : ReactiveObject, ITextualShaderContentViewModel
+    public class ILShaderContentViewModel : ReactiveObject, IShaderContentViewModel, ITextualContent
     {
         /// <summary>
         /// The owning navigation context
         /// </summary>
         public INavigationContext? NavigationContext { get; set; }
-        
+
         /// <summary>
         /// Given descriptor
         /// </summary>
@@ -58,7 +62,7 @@ namespace Studio.ViewModels.Shader
                 NavigationLocation = value?.StartupLocation;
             }
         }
-        
+
         /// <summary>
         /// View icon
         /// </summary>
@@ -67,6 +71,11 @@ namespace Studio.ViewModels.Shader
             get => _icon;
             set => this.RaiseAndSetIfChanged(ref _icon, value);
         }
+
+        /// <summary>
+        /// Tooling tip
+        /// </summary>
+        public string? ToolTip => Resources.Resources.ShaderView_IL;
 
         /// <summary>
         /// The final assembled program
@@ -89,16 +98,21 @@ namespace Studio.ViewModels.Shader
         /// <summary>
         /// Currently selected validation object
         /// </summary>
-        public ValidationObject? SelectedValidationObject
+        public ITextualSourceObject? SelectedTextualSourceObject
         {
-            get => _selectedValidationObject;
-            set => this.RaiseAndSetIfChanged(ref _selectedValidationObject, value);
+            get => _selectedSourceObject;
+            set => this.RaiseAndSetIfChanged(ref _selectedSourceObject, value);
         }
 
         /// <summary>
+        /// Marker canvas view model
+        /// </summary>
+        public SourceObjectMarkerCanvasViewModel MarkerCanvasViewModel { get; } = new();
+        
+        /// <summary>
         /// Current detail view model
         /// </summary>
-        public IValidationDetailViewModel? DetailViewModel
+        public ISourceObjectDetailViewModel? DetailViewModel
         {
             get => _detailViewModel;
             set => this.RaiseAndSetIfChanged(ref _detailViewModel, value);
@@ -111,6 +125,24 @@ namespace Studio.ViewModels.Shader
         {
             get => _navigationLocation;
             set => this.RaiseAndSetIfChanged(ref _navigationLocation, value);
+        }
+
+        /// <summary>
+        /// Assigned content
+        /// </summary>
+        public object? Content
+        {
+            get => _content;
+            set
+            {
+                // Subscribe before potential listeners kick off
+                if (value != null)
+                {
+                    OnObjectChanged((ShaderViewModel)value);
+                }
+                
+                this.RaiseAndSetIfChanged(ref _content, value);
+            }
         }
 
         /// <summary>
@@ -138,6 +170,16 @@ namespace Studio.ViewModels.Shader
         }
 
         /// <summary>
+        /// All services
+        /// </summary>
+        public ObservableCollection<IDestructableObject> Services { get; } = new();
+
+        /// <summary>
+        /// Shader view model of the content
+        /// </summary>
+        public ShaderViewModel? ShaderViewModel => Content as ShaderViewModel;
+
+        /// <summary>
         /// Is this model active?
         /// </summary>
         public bool IsActive
@@ -145,24 +187,7 @@ namespace Studio.ViewModels.Shader
             get => _isActive;
             set => this.RaiseAndSetIfChanged(ref _isActive, value);
         }
-
-        /// <summary>
-        /// Underlying object
-        /// </summary>
-        public Workspace.Objects.ShaderViewModel? Object
-        {
-            get => _object;
-            set
-            {
-                this.RaiseAndSetIfChanged(ref _object, value);
-
-                if (_object != null)
-                {
-                    OnObjectChanged();
-                }
-            }
-        }
-
+        
         public ILShaderContentViewModel()
         {
             OnSelected = ReactiveCommand.Create(OnParentSelected);
@@ -180,7 +205,7 @@ namespace Studio.ViewModels.Shader
                 // Create navigation vm
                 service.SelectedShader = new ShaderNavigationViewModel()
                 {
-                    Shader = Object,
+                    Shader = ShaderViewModel,
                     SelectedFile = null
                 };
             }
@@ -200,7 +225,7 @@ namespace Studio.ViewModels.Shader
         private void OnShowInSource()
         {
             // Navigate to the currently selected validation object
-            NavigationContext?.Navigate(typeof(CodeShaderContentViewModel), SelectedValidationObject?.Segment?.Location);
+            NavigationContext?.Navigate(typeof(CodeContentViewModel), SelectedTextualSourceObject?.Segment?.Location);
         }
 
         /// <summary>
@@ -213,15 +238,15 @@ namespace Studio.ViewModels.Shader
         }
 
         /// <summary>
-        /// Is a validation object visible?
+        /// Is a location visible?
         /// </summary>
-        public bool IsObjectVisible(ValidationObject validationObject)
+        public bool IsLocationVisible(ShaderLocation location)
         {
             return true;
         }
 
         /// <summary>
-        /// Transform a shader location line
+        /// Transform a shader location
         /// </summary>
         public int TransformLine(ShaderLocation shaderLocation)
         {
@@ -231,22 +256,88 @@ namespace Studio.ViewModels.Shader
             }
             
             // Transform instruction indices to line from assembler
-            return (int)Assembler.GetMapping(shaderLocation.BasicBlockId, shaderLocation.InstructionIndex).Line;
+            return (int)Assembler.GetLineMapping(shaderLocation.BasicBlockId, shaderLocation.InstructionIndex).Line;
+        }
+
+        /// <summary>
+        /// Transform a shader line
+        /// </summary>
+        public ShaderMultiAssociationViewModel<ShaderInstructionSourceAssociationViewModel>? TransformInstructionLine(AssembledInstructionMapping mapping)
+        {
+            ShaderMultiAssociationViewModel<ShaderInstructionSourceAssociationViewModel> viewModel = new();
+
+            // Association is trivial, just fetch the assembled lookup
+            ShaderUtils.SubscribeDeferredProgram(PropertyCollection!, ShaderViewModel!, () =>
+            {
+                viewModel.Associations.Add(
+                    new ShaderMultiAssociationPair<ShaderInstructionSourceAssociationViewModel>()
+                    {
+                        ShaderViewModel = ShaderViewModel!,
+                        Association = new ShaderInstructionSourceAssociationViewModel()
+                        {
+                            Location = new ShaderLocation()
+                            {
+                                BasicBlockId = mapping.BasicBlockId,
+                                InstructionIndex = mapping.InstructionIndex,
+                                Line = TransformLine(new ShaderLocation()
+                                {
+                                    BasicBlockId = mapping.BasicBlockId,
+                                    InstructionIndex = mapping.InstructionIndex
+                                })
+                            }
+                        }
+                    }
+                );
+            });
+
+            return viewModel;
+        }
+
+        /// <summary>
+        /// Transform a shader location line
+        /// </summary>
+        public ShaderMultiAssociationViewModel<ShaderInstructionAssociationViewModel>? TransformSourceLine(int line)
+        {
+            if (Assembler == null)
+            {
+                throw new Exception("Transformation without an assembler");
+            }
+            
+            ShaderMultiAssociationViewModel<ShaderInstructionAssociationViewModel> multiViewModel = new();
+            
+            // Transform instruction indices to line from assembler
+            multiViewModel.Associations.Add(new ShaderMultiAssociationPair<ShaderInstructionAssociationViewModel>
+            {
+                ShaderViewModel = ShaderViewModel!,
+                Association = new ShaderInstructionAssociationViewModel
+                {
+                    Mappings =
+                    {
+                        Assembler.GetInstructionMapping(new AssembledLineMapping()
+                        {
+                            Line = (uint)line
+                        })
+                    },
+                    Populated = true
+                }
+            });
+            
+            return multiViewModel;
         }
 
         /// <summary>
         /// Invoked on object change
         /// </summary>
-        private void OnObjectChanged()
+        private void OnObjectChanged(ShaderViewModel content)
         {
             // Submit request if not already
-            if (Object!.Program == null)
+            if (content.Program == null)
             {
-                PropertyCollection?.GetService<IShaderCodeService>()?.EnqueueShaderIL(Object);
+                PropertyCollection?.GetService<IShaderCodeService>()?.EnqueueShaderIL(content);
             }
 
             // Bind program, assemble when changed
-            Object.WhenAnyValue(x => x.Program).WhereNotNull().Subscribe(program =>
+            content.WhenAnyValue(x => x.Program).WhereNotNull().Subscribe(program =>
             {
                 // Create assembler
                 _assembler = new Assembler(program);
@@ -255,11 +346,6 @@ namespace Studio.ViewModels.Shader
                 AssembledProgram = _assembler.Assemble();
             });
         }
-
-        /// <summary>
-        /// Internal object
-        /// </summary>
-        private Workspace.Objects.ShaderViewModel? _object;
 
         /// <summary>
         /// Underlying view model
@@ -294,11 +380,16 @@ namespace Studio.ViewModels.Shader
         /// <summary>
         /// Internal selection state
         /// </summary>
-        private ValidationObject? _selectedValidationObject;
+        private ITextualSourceObject? _selectedSourceObject;
 
         /// <summary>
         /// Internal detail state
         /// </summary>
-        private IValidationDetailViewModel? _detailViewModel;
+        private ISourceObjectDetailViewModel? _detailViewModel;
+
+        /// <summary>
+        /// Internal content
+        /// </summary>
+        private object? _content;
     }
 }

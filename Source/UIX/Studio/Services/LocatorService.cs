@@ -26,6 +26,8 @@
 
 using System;
 using System.Collections.Generic;
+using Studio.Extensions;
+using Studio.Views;
 
 namespace Studio.Services
 {
@@ -38,6 +40,7 @@ namespace Studio.Services
             AddDerived(typeof(ViewModels.Documents.WhatsNewDescriptor), typeof(ViewModels.Documents.WhatsNewViewModel));
             AddDerived(typeof(ViewModels.Documents.WorkspaceOverviewDescriptor), typeof(ViewModels.Documents.WorkspaceOverviewViewModel));
             AddDerived(typeof(ViewModels.Documents.ShaderDescriptor), typeof(ViewModels.Documents.ShaderViewModel));
+            AddDerived(typeof(ViewModels.Documents.CodeFileDescriptor), typeof(ViewModels.Documents.CodeViewModel));
             
             // Setting types
             AddDerived(typeof(ViewModels.Setting.DiscoverySettingViewModel), typeof(Views.Setting.DiscoverySettingView));
@@ -45,6 +48,7 @@ namespace Studio.Services
             AddDerived(typeof(ViewModels.Setting.ApplicationListSettingViewModel), typeof(Views.Setting.ApplicationListSettingView));
             AddDerived(typeof(ViewModels.Setting.ApplicationSettingViewModel), typeof(Views.Setting.ApplicationSettingView));
             AddDerived(typeof(ViewModels.Setting.PDBSettingViewModel), typeof(Views.Setting.PDBSettingView));
+            AddDerived(typeof(ViewModels.Setting.SourceSettingViewModel), typeof(Views.Setting.SourceSettingView));
             AddDerived(typeof(ViewModels.Setting.GlobalSettingViewModel), typeof(Views.Setting.GlobalSettingView));
             
             // Window types
@@ -61,6 +65,7 @@ namespace Studio.Services
             // Object types
             AddDerived(typeof(ViewModels.Workspace.Objects.MissingDetailViewModel), typeof(Views.Workspace.Objects.MissingDetailView));
             AddDerived(typeof(ViewModels.Workspace.Objects.NoDetailViewModel), typeof(Views.Workspace.Objects.NoDetailView));
+            AddDerived(typeof(ViewModels.Workspace.Objects.GenericValidationDetailViewModel), typeof(Views.Workspace.Objects.GenericValidationDetailView));
             AddDerived(typeof(ViewModels.Workspace.Objects.ResourceValidationDetailViewModel), typeof(Views.Workspace.Objects.ResourceValidationDetailView));
         }
 
@@ -69,25 +74,35 @@ namespace Studio.Services
         /// </summary>
         /// <param name="type">source type</param>
         /// <param name="derived">derived type</param>
-        public void AddDerived(Type type, Type derived)
+        /// <param name="viewType">type of the view</param>
+        public void AddDerived(Type type, Type derived, ViewType viewType = ViewType.Primary)
         {
-            _locators.Add(type, derived);
+            _types.GetOrAddDefault(viewType).Locators.Add(type, derived);
         }
 
         /// <summary>
         /// Get the derived type
         /// </summary>
         /// <param name="type">source type</param>
+        /// <param name="viewType">type of the view</param>
         /// <returns></returns>
-        public Type? GetDerived(Type type)
+        public Type? GetDerived(Type type, ViewType viewType)
         {
-            _locators.TryGetValue(type, out Type? derived);
+            _types.GetOrAddDefault(viewType).Locators.TryGetValue(type, out Type? derived);
             return derived;
+        }
+
+        /// <summary>
+        /// Bucket for a type
+        /// </summary>
+        private class TypeBucket
+        {
+            public Dictionary<Type, Type> Locators = new();
         }
 
         /// <summary>
         /// Internal lookup
         /// </summary>
-        private Dictionary<Type, Type> _locators = new();
+        private Dictionary<ViewType, TypeBucket> _types = new();
     }
 }

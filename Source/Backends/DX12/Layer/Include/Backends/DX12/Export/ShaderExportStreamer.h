@@ -31,10 +31,13 @@
 #include <Backends/DX12/Export/ShaderExportStreamState.h>
 #include <Backends/DX12/Export/ShaderExportDescriptorLayout.h>
 #include <Backends/DX12/Export/ShaderExportConstantAllocator.h>
+#include <Backends/DX12/Export/ShaderExportDeviceAllocator.h>
+#include <Backends/DX12/Resource/DescriptorDataSegment.h>
 
 // Common
 #include <Common/IComponent.h>
 #include <Common/ComRef.h>
+#include <Common/Containers/BucketPoolAllocator.h>
 
 // Common
 #include <Common/Containers/Vector.h>
@@ -56,6 +59,7 @@ struct CommandQueueState;
 struct DeviceState;
 struct CommandListState;
 struct DescriptorHeapState;
+struct ExecutionInfo;
 class IBridge;
 
 class ShaderExportStreamer : public TComponent<ShaderExportStreamer> {
@@ -142,6 +146,12 @@ public:
     /// \param commandList the command list
     void SetGraphicsRootSignature(ShaderExportStreamState* state, const RootSignatureState* rootSignature, ID3D12GraphicsCommandList* commandList);
 
+    /// Set the execution info
+    /// @param state the stream state
+    /// @param type the pipeline type to bind for
+    /// @param executionInfo the execution info to set
+    void SetExecutionInfo(ShaderExportStreamState* state, PipelineType type, const ExecutionInfo& executionInfo);
+
     /// Commit all compute data
     /// \param state given state
     /// \param commandList current command list
@@ -156,9 +166,9 @@ public:
     /// \param state the stream state
     /// \param pipeline the pipeline state being bound
     /// \param pipelineObject active backend state being bound
-    /// \param instrumented true if an instrumented pipeline has been bound
-    /// \param commandList the command list
-    void BindPipeline(ShaderExportStreamState* state, const PipelineState* pipeline, ID3D12PipelineState* pipelineObject, bool instrumented, ID3D12GraphicsCommandList* list);
+    /// \param instrument the instrumented pipeline
+    /// \param list the command list
+    void BindPipeline(ShaderExportStreamState* state, const PipelineState* pipeline, IUnknown* pipelineObject, PipelineInstrument* instrument, ID3D12GraphicsCommandList* list);
 
     /// Map a stream state pre submission
     /// \param state the stream state
@@ -251,6 +261,17 @@ public:
     /// \param commandList the command list
     void BindShaderExport(ShaderExportStreamState* state, const PipelineState* pipeline, ID3D12GraphicsCommandList* commandList);
 
+private:
+    /// Process all streaming backend chunks
+    /// \param state the stream state
+    void ProcessBackendMessages(ShaderExportStreamState* state);
+    
+#ifndef NDEBUG
+    /// Process all streaming debug chunks
+    /// \param state the stream state
+    void ProcessStreamDebug(ShaderExportStreamState* state);
+#endif // NDEBUG
+
 public:
     /// Whole device sync point
     void Process();
@@ -258,6 +279,19 @@ public:
     /// Queue specific sync point
     /// \param queueState the queue state
     void Process(CommandQueueState* queueState);
+
+    /// Process all pending descriptors
+    /// Locks
+    void ProcessDescriptors();
+
+public:
+    /// Get the number of descriptors for exporting
+    uint32_t GetShaderExportDescriptorCount();
+
+    /// Create an external shader export
+    /// @param state state to create the export for
+    /// @param heapAllocation allocation to create the export on
+    void CreateExternalShaderExport(ShaderExportStreamState* state, const ShaderExportOwnedHeapAllocation& heapAllocation);
 
 private:
     /// Map all segment agnostic data
@@ -274,14 +308,34 @@ private:
     /// Process a segment
     bool ProcessSegment(ShaderExportStreamSegment* segment, TrivialStackVector<CommandContextHandle, 32u>& completedHandles);
 
+    /// Allocate descriptors for a segment
+    /// @param allocator owning allocator 
+    /// @param tsaStride the two-sided allocator stride
+    /// @param state owning state
+    /// @return always valid
+    ShaderExportSegmentDescriptorInfo AllocateSegmentDescriptors(ShaderExportFixedTwoSidedDescriptorAllocator *allocator, uint32_t tsaStride, ShaderExportStreamState *state);
+
     /// Free a segment
     void FreeSegmentNoQueueLock(CommandQueueState* queue, ShaderExportStreamSegment* segment);
 
     /// Free a constant allocator
     void FreeConstantAllocator(ShaderExportConstantAllocator& allocator);
 
+    /// Free a device allocator
+    void FreeDeviceAllocator(ShaderExportDeviceAllocator& allocator);
+
+    /// Free a heap allocator
+    void FreeHeapAllocator(ShaderExportOwnedHeapAllocator& allocator);
+
     /// Free a descriptor data segment
     void FreeDescriptorDataSegment(const DescriptorDataSegment& dataSegment);
+
+    /// Free all descriptor states
+    /// @param state states to free from
+    void FreeDescriptorState(ShaderExportStreamState *state);
+
+    /// Process all pending descriptors
+    void ProcessDescriptorsNoLock();
 
     /// Perform a linear search for a given heap segment
     /// \param state the state to search in
@@ -302,7 +356,8 @@ private:
     /// \param bindState target bind state
     /// \param rootSignature root signature to clear for
     /// \param type type to invalidate for
-    void InvalidateDescriptorSlots(ShaderExportStreamState* state, ShaderExportStreamBindState& bindState, const RootSignatureState* rootSignature, D3D12_DESCRIPTOR_HEAP_TYPE type);
+    /// \param rootInvalidation should root descriptors be invalidated
+    void InvalidateDescriptorSlots(ShaderExportStreamState* state, ShaderExportStreamBindState& bindState, const RootSignatureState* rootSignature, D3D12_DESCRIPTOR_HEAP_TYPE type, bool rootInvalidation);
 
 private:
     /// Update all reserved heap data
@@ -348,8 +403,10 @@ private:
     /// All free constant buffers
     Vector<ConstantShaderDataBuffer> freeConstantShaderDataBuffers;
 
-    /// All free constant allocators
+    /// All free allocators
     Vector<ShaderExportConstantAllocator> freeConstantAllocators;
+    Vector<ShaderExportDeviceAllocator> freeDeviceAllocators;
+    Vector<ShaderExportOwnedHeapAllocator> freeHeapAllocators;
 
     /// Components
     ComRef<DeviceAllocator> deviceAllocator{nullptr};

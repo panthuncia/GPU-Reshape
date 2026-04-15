@@ -60,7 +60,7 @@
             <ListBox
                 ItemsSource="{Binding SearchDirectories}"
                 SelectedItem="{Binding SelectedItem}"
-                MinHeight="200">
+                MinHeight="100">
                 <ListBox.ItemTemplate>
                     <DataTemplate>
                         <controls:EditLabel Text="{Binding}" CloseCommand="{Binding

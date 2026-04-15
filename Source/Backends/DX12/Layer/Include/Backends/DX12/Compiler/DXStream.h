@@ -47,6 +47,14 @@ struct DXStream {
 
     }
 
+    /// Default constructors
+    DXStream(const DXStream& other) = default;
+    DXStream(DXStream&& other) = default;
+
+    /// Default assignment
+    DXStream& operator=(const DXStream& other) = default;
+    DXStream& operator=(DXStream&& other) = default;
+
     /// Append a chunk of data
     /// \param ptr the data
     /// \param wordCount the word count of [ptr]
@@ -101,6 +109,14 @@ struct DXStream {
     template<typename T>
     void Write(size_t offset, const T& value) {
         std::memcpy(stream.data() + offset, &value, sizeof(T));
+    }
+
+    /// Align this stream, fills with zeros
+    /// \param align expected alignment
+    void AlignTo(uint32_t align) {
+        if (uint32_t miss = stream.size() % align) {
+            stream.resize(stream.size() + align - miss, 0);
+        }
     }
 
     /// Get the word data

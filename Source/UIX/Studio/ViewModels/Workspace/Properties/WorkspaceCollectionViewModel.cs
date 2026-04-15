@@ -177,6 +177,18 @@ namespace Studio.ViewModels.Workspace.Properties
                 Property = this,
                 ConnectionViewModel = ConnectionViewModel
             });
+            
+            // Register instruction mapping service
+            Services.Add(new ShaderInstructionMappingService()
+            {
+                ConnectionViewModel = ConnectionViewModel
+            });
+            
+            // Register code indexing service
+            Services.Add(new FileCodeService()
+            {
+                Property = this
+            });
         }
 
         /// <summary>

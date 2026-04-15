@@ -30,6 +30,7 @@
 #include <Backends/Vulkan/Vulkan.h>
 #include <Backends/Vulkan/Resource/VirtualResourceMapping.h>
 #include <Backends/Vulkan/States/DeviceMemoryTag.h>
+#include <Backends/Vulkan/States/ResourceState.h>
 
 // Std
 #include <cstdint>
@@ -37,7 +38,7 @@
 // Forward declarations
 struct DeviceDispatchTable;
 
-struct ImageState {
+struct ImageState  : public ResourceState {
     /// Backwards reference
     DeviceDispatchTable* table;
 

@@ -26,7 +26,6 @@
 
 using System.Collections.ObjectModel;
 using System.Windows.Input;
-using Avalonia;
 using Avalonia.Media;
 using DynamicData;
 using ReactiveUI;
@@ -52,6 +51,15 @@ namespace Studio.ViewModels.Menu
         {
             get => _isEnabled;
             set => this.RaiseAndSetIfChanged(ref _isEnabled, value);
+        }
+
+        /// <summary>
+        /// Is visible?
+        /// </summary>
+        public bool IsVisible
+        {
+            get => _isVisible;
+            set => this.RaiseAndSetIfChanged(ref _isVisible, value);
         }
 
         /// <summary>
@@ -101,7 +109,7 @@ namespace Studio.ViewModels.Menu
         /// </summary>
         private void OnSettings()
         {
-            ServiceRegistry.Get<IWindowService>()?.OpenFor(new SettingsViewModel());
+            ServiceRegistry.Get<IWindowService>()?.OpenDialogFor(new SettingsViewModel());
         }
 
         /// <summary>
@@ -121,5 +129,10 @@ namespace Studio.ViewModels.Menu
         /// Internal enabled state
         /// </summary>
         private bool _isEnabled = true;
+
+        /// <summary>
+        /// Internal visible state
+        /// </summary>
+        private bool _isVisible = true;
     }
 }

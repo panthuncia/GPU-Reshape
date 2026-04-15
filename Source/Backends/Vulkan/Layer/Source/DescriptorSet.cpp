@@ -41,8 +41,10 @@
 #include <Backends/Vulkan/ShaderData/ShaderDataHost.h>
 #include <Backends/Vulkan/States/DescriptorPoolState.h>
 #include <Backends/Vulkan/Resource/DescriptorResourceMapping.h>
+#include <Backends/Vulkan/Resource/DescriptorData.h>
 
 // Backend
+#include <Backend/IL/Execution/ExecutionInfo.h>
 #include <Backend/IL/ResourceTokenType.h>
 
 // Common
@@ -471,6 +473,33 @@ VKAPI_ATTR void VKAPI_PTR Hook_vkUpdateDescriptorSetWithTemplate(VkDevice device
     }
 }
 
+static void AlignDataControlRow4(DescriptorDataControl& control) {
+    if (uint32_t pending = control.dwordCount % 4; pending > 0) {
+        control.dwordCount += 4 - pending;
+    }
+}
+
+static DescriptorDataControl GetDescriptorDataControl(uint32_t boundUserDescriptorStates) {
+    DescriptorDataControl control{};
+
+    // Always starts with the header
+    control.dwordCount += sizeof(DescriptorDataHeader);
+
+    // Append PRM data, always appears without an indirection data the control header
+    control.dwordCount += boundUserDescriptorStates * kDescriptorDataDWordCount;
+
+    // Append execution info, indirect
+    AlignDataControlRow4(control);
+    {
+        ASSERT(control.dwordCount % 4 == 0, "Unaligned execution header");
+        control.header.executionDWordOffset = control.dwordCount;
+        control.dwordCount += kExecutionInfoDWordCount;
+    }
+
+    // OK
+    return control;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL Hook_vkCreatePipelineLayout(VkDevice device, const VkPipelineLayoutCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkPipelineLayout *pPipelineLayout) {
     DeviceDispatchTable *table = DeviceDispatchTable::Get(GetInternalTable(device));
 
@@ -488,7 +517,7 @@ VKAPI_ATTR VkResult VKAPI_CALL Hook_vkCreatePipelineLayout(VkDevice device, cons
     pAllocator = nullptr;
 
     // If we have exhausted all the sets, we can't add further records
-    bool exhausted = pCreateInfo->setLayoutCount >= table->physicalDeviceProperties.limits.maxBoundDescriptorSets;
+    bool exhausted = pCreateInfo->setLayoutCount >= table->physicalDeviceProperties.properties.limits.maxBoundDescriptorSets;
     if (exhausted) {
         // Pass down callchain
         VkResult result = table->next_vkCreatePipelineLayout(device, pCreateInfo, pAllocator, pPipelineLayout);
@@ -505,7 +534,7 @@ VKAPI_ATTR VkResult VKAPI_CALL Hook_vkCreatePipelineLayout(VkDevice device, cons
 
         // Get number of events
         uint32_t eventCount{0};
-        table->dataHost->Enumerate(&eventCount, nullptr, ShaderDataType::Event);
+        table->dataHost->EnumerateShader(&eventCount, nullptr, ShaderDataType::Event);
 
         // To length
         dataPushConstantLength += eventCount * sizeof(uint32_t);
@@ -633,6 +662,9 @@ VKAPI_ATTR VkResult VKAPI_CALL Hook_vkCreatePipelineLayout(VkDevice device, cons
     state->dataPushConstantOffset = dataPushConstantOffset;
     state->dataPushConstantLength = dataPushConstantLength;
     state->pushConstantRangeMask  = pushConstantRangeMask;
+
+    // Setup the data control
+    state->physicalMapping.descriptorDataControl = GetDescriptorDataControl(state->boundUserDescriptorStates);
 
     // Store lookup
     table->states_pipelineLayout.Add(*pPipelineLayout, state);

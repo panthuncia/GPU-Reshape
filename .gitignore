@@ -1,6 +1,8 @@
-# JetBrains
-.idea/
-.idea_modules/
+# IDEs and related
+.*/
+
+# Private data
+Restrict/
 
 # Python
 venv/
@@ -25,6 +27,7 @@ ThirdParty/VulkanHeaders/
 ThirdParty/SPIRVHeaders/
 ThirdParty/SPIRVTools/
 ThirdParty/VulkanLoader/
+ThirdParty/VulkanCTS/
 ThirdParty/JSON/
 ThirdParty/Detour/
 ThirdParty/DXIL/
@@ -56,10 +59,6 @@ ThirdParty/STB/
 mono_crash.*
 
 # Build results
-[Dd]ebug/
-[Dd]ebugPublic/
-[Rr]elease/
-[Rr]eleases/
 x64/
 x86/
 [Ww][Ii][Nn]32/
@@ -484,3 +483,7 @@ $RECYCLE.BIN/
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+
+## Extra
+out/
+Build/

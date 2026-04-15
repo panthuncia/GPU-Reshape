@@ -33,4 +33,7 @@ namespace Backend {
     static constexpr const char* kNoServiceTrapKey = "GPUOpen.GRS.NoServiceTrap";
     static constexpr const char* kCaptureChildProcessesKey = "GPUOpen.GRS.CaptureChildProcesses";
     static constexpr const char* kAttachAllDevicesKey = "GPUOpen.GRS.AttachAllDevices";
+    static constexpr const char* kWaitForConnectionKey = "GPUOpen.GRS.WaitForConnection";
+    static constexpr const char* kSuspendDeferredInitializationKey = "GPUOpen.GRS.SuspendDeferredInitialization";
+    static constexpr const char* kWaitForDebugger = "GPUOpen.GRS.WaitForDebugger";
 }

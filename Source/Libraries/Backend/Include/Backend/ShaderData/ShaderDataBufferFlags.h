@@ -36,7 +36,16 @@ enum class ShaderDataBufferFlag {
     HostVisible = BIT(0),
 
     /// This buffer represents a tiled / sparse resource, and must be mapped manually
-    Tiled = BIT(1)
+    Tiled = BIT(1),
+
+    /// This resource is host-local
+    Host = BIT(2),
+    
+    /// This resource is not an implicit descriptor
+    NonDescriptor = BIT(3),
+    
+    /// This resource is used with predicates
+    Predicate = BIT(4)
 };
 
 BIT_SET(ShaderDataBufferFlag);

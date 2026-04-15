@@ -46,11 +46,16 @@ struct SpvUtilShaderDescriptorConstantData {
     /// \param job source job being compiled against
     void CompileRecords(const SpvJob &job);
 
-    /// Export a given value
+    /// Get a PRM descriptor dword
     /// \param stream the current spirv stream
     /// \param offset the element wise offset
     /// \param index the dword index
-    IL::ID GetDescriptorData(SpvStream& stream, IL::ID offset, uint32_t index);
+    IL::ID GetPRMDescriptorData(SpvStream& stream, IL::ID offset, uint32_t index);
+
+    /// Get a descriptor dword
+    /// \param stream the current spirv stream
+    /// \param offset the element wise offset
+    IL::ID GetDescriptorData(SpvStream& stream, IL::ID offset);
 
     /// Copy to a new block
     /// \param remote the new block table

@@ -49,6 +49,14 @@ namespace IL {
 
         /// Specifies the workgroup size of a program
         /// Payload: KernelWorkgroupSizeMetadata
-        KernelWorkgroupSize
+        KernelWorkgroupSize,
+
+        /// Specifies the type of the kernel
+        /// Payload: KernelTypeMetadata
+        KernelType,
+
+        /// Specifies that the program should use early depth stencil
+        /// Payload: None
+        EarlyDepthStencil
     };
 }

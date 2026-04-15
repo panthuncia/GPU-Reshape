@@ -28,6 +28,7 @@
 
 // Layer
 #include <Backends/Vulkan/Compiler/Spv.h>
+#include <Backends/Vulkan/Compiler/SpvSourceAssociation.h>
 
 // Common
 #include <Common/Assert.h>
@@ -35,6 +36,53 @@
 // Std
 #include <vector>
 #include <string_view>
+#include <span>
+
+struct SpvDebugVariableInfo {
+    /// Id of this variable
+    SpvId varId = IL::InvalidID;
+    
+    /// Name of this variable
+    SpvId nameId = IL::InvalidID;
+    
+    /// Type of this variable
+    SpvId typeId = IL::InvalidID;
+};
+    
+struct InstructionValueInfo {
+    /// Debug variable were storing to
+    SpvId debugVariableId = IL::InvalidID;
+    
+    /// Value being stored
+    SpvId value = IL::InvalidID;
+    
+    /// Originating expression
+    SpvId expression = IL::InvalidID;
+    
+    /// Optional structural indices
+    std::span<const SpvId> accessIndices{};
+};
+    
+struct SpvDebugInstructionValueSetInfo {
+    /// All values associated with this instruction
+    std::vector<InstructionValueInfo> values;
+};
+    
+struct SpvDebugBindingInfo {
+    /// Debug variable bound to this instance
+    SpvId debugVariable = IL::InvalidID;
+};
+
+struct SpvDebugTypeInfo {
+    /// Kind of this type
+    SpvOp kind = {};
+    
+    /// Optional operands
+    const SpvId* operands = nullptr;
+    
+    /// Number of operands
+    uint32_t opCount = 0;
+};
 
 struct SpvDebugMap {
     /// Set the id bound
@@ -78,6 +126,18 @@ struct SpvDebugMap {
     SpvOp GetOpCode(SpvId id) const {
         return entries.at(id).op;
     }
+
+    /// All debug variables
+    std::unordered_map<SpvId, SpvDebugVariableInfo> variableInfos;
+    
+    /// All instruction associations
+    std::unordered_map<uint32_t, SpvDebugInstructionValueSetInfo> instructionValueInfos;
+
+    /// All variable bindings
+    std::unordered_map<SpvId, SpvDebugBindingInfo> bindingInfos;
+    
+    /// All debug types
+    std::unordered_map<SpvId, SpvDebugTypeInfo> typeInfos;
 
 private:
     struct Entry {

@@ -37,6 +37,7 @@
              xmlns:shader="clr-namespace:Studio.ViewModels.Shader"
              xmlns:controls="clr-namespace:Studio.Views.Controls"
              xmlns:controls1="https://github.com/avalonia_extendedtoolkit"
+             xmlns:svm="clr-namespace:Studio.ViewModels.Shader;assembly=UIX.Studio.Runtime"
              mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
              x:Class="Studio.Views.Documents.ShaderView"
              x:DataType="documents:ShaderViewModel"
@@ -82,17 +83,32 @@
                 </ItemsPanelTemplate>
             </ItemsControl.ItemsPanel>
             <ItemsControl.ItemTemplate>
-                <DataTemplate x:DataType="shader:IShaderContentViewModel">
+                <DataTemplate x:DataType="svm:IShaderContentViewModel">
                     <ToggleButton
                         Margin="0,0,5,0" 
                         Background="Transparent"
                         BorderThickness="0"
                         Height="25"
-                        IsChecked="{Binding IsActive}">
+                        IsChecked="{Binding IsActive}"
+                        ToolTip.Tip="{Binding ToolTip}">
                         <PathIcon Data="{Binding Icon}" Width="15" />
                     </ToggleButton>
                 </DataTemplate>
             </ItemsControl.ItemTemplate>
         </ItemsControl>
+        
+        <Border
+            VerticalAlignment="Top"
+            HorizontalAlignment="Right"
+            Margin="0 13 65 0"
+            IsVisible="{Binding IsOptimized}"
+            Background="{StaticResource WarningLowColor}" 
+            CornerRadius="5"
+            Height="20">
+            <StackPanel Orientation="Horizontal" Spacing="3" Margin="5 0 5 0">
+                <PathIcon Data="{StaticResource Warning}" Width="13" VerticalAlignment="Center"/>
+                <TextBlock VerticalAlignment="Center">Optimized Shader - limited debugging</TextBlock>
+            </StackPanel>
+        </Border>
     </Grid>
 </UserControl>

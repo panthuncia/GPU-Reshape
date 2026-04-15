@@ -354,6 +354,19 @@ namespace IL {
             return Op(instr);
         }
 
+        /// Get the execution info of the current invocation
+        /// \return instruction reference
+        BasicBlock::TypedIterator <ExecutionInfoInstruction> ExecutionInfo() {
+            // Mark feature
+            program->GetFeatureTable().executionInfo = true;
+            
+            ExecutionInfoInstruction instr{};
+            instr.opCode = OpCode::ExecutionInfo;
+            instr.source = source;
+            instr.result = map->AllocID();
+            return Op(instr);
+        }
+
         /// Binary add two values
         /// \param lhs lhs operand
         /// \param rhs rhs operand
@@ -466,6 +479,26 @@ namespace IL {
             instr->source = source;
             instr->result = map->AllocID();
             instr->values.count = sizeof...(VX);
+
+            // Write all values
+            for (uint32_t i = 0; i < instr->values.count; i++) {
+                instr->values[i] = values[i];
+            }
+
+            return Op(*instr, type);
+        }
+
+        /// Construct a new composite
+        /// \param type the composite type
+        /// \param values the values to be inserted
+        /// \param valueCount the number of values
+        /// \return instruction reference
+        BasicBlock::TypedIterator<ConstructInstruction> ConstructPtr(const Backend::IL::Type* type, IL::ID* values, uint32_t valueCount) {
+            auto instr = ALLOCA_SIZE(IL::ConstructInstruction, IL::ConstructInstruction::GetSize(valueCount));
+            instr->opCode = OpCode::Construct;
+            instr->source = source;
+            instr->result = map->AllocID();
+            instr->values.count = valueCount;
 
             // Write all values
             for (uint32_t i = 0; i < instr->values.count; i++) {
@@ -948,6 +981,25 @@ namespace IL {
             instr.fail = fail->GetID();
             instr.controlFlow = controlFlow;
             return Op(instr);
+        }
+
+        BasicBlock::TypedIterator<SwitchInstruction> Switch(ID value, BasicBlock* defaultBlock, uint32_t count, SwitchCase* cases, ControlFlow controlFlow ) {
+            ASSERT(IsMapped(value), "Unmapped identifier");
+
+            auto instr = ALLOCA_SIZE(IL::SwitchInstruction, IL::SwitchInstruction::GetSize(count));
+            instr->opCode = OpCode::Switch;
+            instr->source = source;
+            instr->controlFlow = controlFlow;
+            instr->result = IL::InvalidID;
+            instr->value = value;
+            instr->_default = defaultBlock->GetID();
+            instr->cases.count = count;
+            
+            for (uint32_t i = 0; i < count; i++) {
+                instr->cases[i] = cases[i];
+            }
+            
+            return Op(*instr);
         }
 
         /// Add return instruction

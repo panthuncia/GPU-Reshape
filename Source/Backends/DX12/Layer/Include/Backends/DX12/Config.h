@@ -36,27 +36,33 @@
 #   define DX12_DIAGNOSTIC 0
 #endif
 
+/// Enables the tracked allocator for memory debugging
+#define USE_TRACKED_ALLOCATOR 0
+
+/// Enable all shader compilation debug options
+#define SHADER_COMPILER_ALL_DEBUG 0
+
 /// Enable debugging mode for shader compiler
-#define SHADER_COMPILER_DEBUG (DX12_DIAGNOSTIC && 0)
+#define SHADER_COMPILER_DEBUG (DX12_DIAGNOSTIC && (SHADER_COMPILER_ALL_DEBUG || 0))
 
 /// Enable serial compilation for debugging purposes
-#define SHADER_COMPILER_SERIAL (DX12_DIAGNOSTIC && 0)
-
-/// Log allocations
-#define LOG_ALLOCATION (DX12_DIAGNOSTIC && 0)
+#define SHADER_COMPILER_SERIAL (DX12_DIAGNOSTIC && (SHADER_COMPILER_ALL_DEBUG || 0))
 
 /// Validates LLVM bit-stream 1:1 read / writes
-#define DXIL_VALIDATE_MIRROR (DX12_DIAGNOSTIC && 0)
+#define DXIL_VALIDATE_MIRROR (DX12_DIAGNOSTIC && (SHADER_COMPILER_ALL_DEBUG || 0))
 
 /// Dump DXIL bit stream to file?
 ///   Useful with llvm-bcanalyzer
-#define DXIL_DUMP_BITSTREAM (DX12_DIAGNOSTIC && 0)
+#define DXIL_DUMP_BITSTREAM (DX12_DIAGNOSTIC && (SHADER_COMPILER_ALL_DEBUG || 0))
 
 /// Dump DXBC byte stream to file?
-#define DXBC_DUMP_STREAM (DX12_DIAGNOSTIC && 0)
+#define DXBC_DUMP_STREAM (DX12_DIAGNOSTIC && (SHADER_COMPILER_ALL_DEBUG || 0))
 
 /// Pretty print pipeline IL?
-#define DXIL_PRETTY_PRINT (DX12_DIAGNOSTIC && 0)
+#define DXIL_PRETTY_PRINT (DX12_DIAGNOSTIC && (SHADER_COMPILER_ALL_DEBUG || 0))
+
+/// Log allocations
+#define LOG_ALLOCATION (DX12_DIAGNOSTIC && 0)
 
 /// Log instrumentation information
 #define LOG_INSTRUMENTATION (1)
@@ -82,6 +88,10 @@
 ///  ? Instrumentation of large applications can be difficult to debug and even harder to reproduce under the same conditions.
 ///    When such a fault occurs, it is very useful to simply be able to iterate on a binary file.
 #define SHADER_COMPILER_DEBUG_FILE (DX12_DIAGNOSTIC && 0)
+
+/// Track all segment owners of descriptor heap allocations
+/// Useful for debugging exhausted heaps
+#define HEAP_ALLOCATOR_TRACK_OWNER (DX12_DIAGNOSTIC && 1)
 
 /** Options **/
 

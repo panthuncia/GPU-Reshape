@@ -26,6 +26,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using GRS.Features.ResourceBounds.UIX.Workspace.Objects;
@@ -33,6 +34,8 @@ using Studio.ViewModels.Workspace;
 using Message.CLR;
 using GRS.Features.ResourceBounds.UIX.Workspace.Properties.Instrumentation;
 using ReactiveUI;
+using Runtime.Threading;
+using Runtime.Utils.Workspace;
 using Runtime.ViewModels.Workspace.Properties;
 using Studio.Models.Instrumentation;
 using Studio.Models.Workspace;
@@ -78,7 +81,7 @@ namespace GRS.Features.Waterfall.UIX.Workspace
             _messageCollectionViewModel = viewModel.PropertyCollection.GetProperty<IMessageCollectionViewModel>();
 
             // Get services
-            _shaderMappingService = viewModel.PropertyCollection.GetService<IShaderMappingService>();
+            _shaderMappingService = viewModel.PropertyCollection.GetService<IShaderSourceMappingService>();
         }
 
         /// <summary>
@@ -99,16 +102,16 @@ namespace GRS.Features.Waterfall.UIX.Workspace
         /// <exception cref="NotImplementedException"></exception>
         public void Handle(ReadOnlyMessageStream streams, uint count)
         {
-            if (streams.GetSchema().type != MessageSchemaType.Static)
+            if (streams.GetSchema().type != MessageSchemaType.Chunked)
                 return;
 
             switch (streams.GetSchema().id)
             {
                 case WaterfallingConditionMessage.ID:
-                    Handle(new StaticMessageView<WaterfallingConditionMessage>(streams));
+                    Handle(new ChunkedMessageView<WaterfallingConditionMessage>(streams));
                     break;
                 case DivergentResourceIndexingMessage.ID:
-                    Handle(new StaticMessageView<DivergentResourceIndexingMessage>(streams));
+                    Handle(new ChunkedMessageView<DivergentResourceIndexingMessage>(streams));
                     break;
             }
         }
@@ -116,7 +119,7 @@ namespace GRS.Features.Waterfall.UIX.Workspace
         /// <summary>
         /// Waterfalling handler
         /// </summary>
-        private void Handle(StaticMessageView<WaterfallingConditionMessage> view)
+        private void Handle(ChunkedMessageView<WaterfallingConditionMessage> view)
         {
             // Latent update set
             var lookup = new Dictionary<uint, WaterfallingConditionMessage>();
@@ -158,7 +161,7 @@ namespace GRS.Features.Waterfall.UIX.Workspace
                     var validationObject = new ValidationObject()
                     {
                         Content = $"Addressing requires scalarization",
-                        Severity = ValidationSeverity.Info,
+                        Severity = SourceObjectSeverity.Info,
                         Count = kv.Value,
                         DetailViewModel = detailViewModel
                     };
@@ -197,46 +200,37 @@ namespace GRS.Features.Waterfall.UIX.Workspace
         /// <summary>
         /// Divergent resource index handler
         /// </summary>
-        private void Handle(StaticMessageView<DivergentResourceIndexingMessage> view)
+        private void Handle(ChunkedMessageView<DivergentResourceIndexingMessage> view)
         {
             // Latent update set
-            var lookup = new Dictionary<uint, DivergentResourceIndexingMessage>();
             var enqueued = new Dictionary<uint, uint>();
-
-            // Consume all messages
-            foreach (DivergentResourceIndexingMessage message in view)
+            
+            // Preallocate initial latents
+            foreach (var kv in _reducedMessages)
             {
-                if (enqueued.TryGetValue(message.sguid, out uint enqueuedCount))
-                {
-                    enqueued[message.sguid] = enqueuedCount + 1;
-                }
-                else
-                {
-                    lookup.Add(message.sguid, message);
-                    enqueued.Add(message.sguid, 1);
-                }
+                enqueued.Add(kv.Key, 0);
             }
 
-            foreach (var kv in enqueued)
+            foreach (DivergentResourceIndexingMessage message in view)
             {
-                // Add to reduced set
-                if (_reducedMessages.ContainsKey(kv.Key))
+                // Add to latent set
+                if (enqueued.TryGetValue(message.Key, out uint enqueuedCount))
                 {
-                    Dispatcher.UIThread.InvokeAsync(() => { _reducedMessages[kv.Key].Count += kv.Value; });
+                    enqueued[message.Key] = enqueuedCount + 1u;
                 }
                 else
                 {
-                    // Get from key
-                    var message = lookup[kv.Key];
-                    
                     // Create object
                     var validationObject = new ValidationObject()
                     {
                         Content = $"Divergent resource addressing",
-                        Severity = ValidationSeverity.Error,
-                        Count = kv.Value,
+                        Severity = SourceObjectSeverity.Error,
+                        Count = 1u,
                         DetailViewModel = _divergentResourceAddressingDetailViewModel
                     };
+                    
+                    // Register with latent
+                    enqueued.Add(message.Key, 1u);
 
                     // Shader view model injection
                     validationObject.WhenAnyValue(x => x.Segment).WhereNotNull().Subscribe(x =>
@@ -257,10 +251,71 @@ namespace GRS.Features.Waterfall.UIX.Workspace
                     _shaderMappingService?.EnqueueMessage(validationObject, message.sguid);
 
                     // Insert lookup
-                    _reducedMessages.Add(kv.Key, validationObject);
+                    _reducedMessages.Add(message.Key, validationObject);
 
                     // Add to UI visible collection
                     Dispatcher.UIThread.InvokeAsync(() => { _messageCollectionViewModel?.ValidationObjects.Add(validationObject); });
+                }
+                
+                // Formatted?
+                // TODO: Optimize the hell out of this, current version is not good enough
+                if (message.IsChunked())
+                {
+                    // Get detailed view model
+                    if (!_reducedDetails.TryGetValue(message.sguid, out ResourceValidationDetailViewModel? detailViewModel))
+                    {
+                        // Not found, find the object
+                        if (!_reducedMessages.TryGetValue(message.sguid, out ValidationObject? validationObject))
+                        {
+                            continue;
+                        }
+
+                        // Create the missing detail view model
+                        detailViewModel = new ResourceValidationDetailViewModel();
+                        
+                        // Assign on UI thread
+                        Dispatcher.UIThread.InvokeAsync(() =>
+                        {
+                            validationObject.DetailViewModel = detailViewModel;
+                        });
+                        
+                        // Add lookup
+                        _reducedDetails.Add(message.sguid, detailViewModel);
+                    }
+
+                    // Formatted message
+                    StringBuilder builder = new();
+                    builder.Append("Divergent resource addressing");
+                    
+                    // Destination resource
+                    Resource resource = new Resource()
+                    {
+                        Name = "Unknown",
+                        IsUnknown = true
+                    };
+
+                    // Handle traceback
+                    if (message.HasChunk(DivergentResourceIndexingMessage.Chunk.Traceback))
+                    {
+                        DivergentResourceIndexingMessage.TracebackChunk tracebackChunk = message.GetTracebackChunk();
+                        builder.Append($" at {TracebackUtils.Format(ViewModel, tracebackChunk.GetModel())}");
+                    }
+
+                    // Append message on resource
+                    ResourceValidationObject resourceValidationObject = detailViewModel.FindOrAddResource(resource);
+                    resourceValidationObject.AddUniqueInstance(builder.ToString());
+                }
+            }
+            
+            // Update counts on main thread
+            foreach (var kv in enqueued)
+            {
+                if (_reducedMessages.TryGetValue(kv.Key, out ValidationObject? value))
+                {
+                    if (kv.Value > 0)
+                    {
+                        ValidationMergePumpBus.Increment(value, kv.Value);
+                    }
                 }
             }
         }
@@ -311,9 +366,14 @@ namespace GRS.Features.Waterfall.UIX.Workspace
         private Dictionary<uint, ValidationObject> _reducedMessages = new();
 
         /// <summary>
+        /// All reduced resource messages
+        /// </summary>
+        private Dictionary<uint, ResourceValidationDetailViewModel> _reducedDetails = new();
+
+        /// <summary>
         /// Segment mapping
         /// </summary>
-        private IShaderMappingService? _shaderMappingService;
+        private IShaderSourceMappingService? _shaderMappingService;
 
         /// <summary>
         /// Validation container

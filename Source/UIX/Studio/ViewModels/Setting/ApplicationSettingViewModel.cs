@@ -52,7 +52,8 @@ namespace Studio.ViewModels.Setting
             Items.AddRange(new ISettingViewModel[]
             {
                 new GlobalSettingViewModel(),
-                new PDBSettingViewModel()
+                new PDBSettingViewModel(),
+                new SourceSettingViewModel()
             });
         }
 

@@ -26,7 +26,11 @@
 
 #include <ShaderExportGenerator.h>
 
+// Backend
+#include <Backend/IL/Execution/ExecutionInfo.h>
 #include <Backend/ShaderExport.h>
+
+// Std
 #include <sstream>
 #include <iostream>
 
@@ -36,10 +40,45 @@ bool ShaderExportGenerator::Generate(Schema &schema, Language language, SchemaSt
         if (!message.attributes.GetBool("no-sguid")) {
             Field& sguid = *message.fields.emplace(message.fields.begin());
             sguid.name = "sguid";
-            sguid.type = "uint16";
+            sguid.type = "uint32";
 
             // Attributes
             sguid.attributes.Add("bits", std::to_string(kShaderSGUIDBitCount));
+        }
+
+        // Append traceback if requested
+        if (!message.attributes.GetBool("no-traceback")) {
+            Chunk &chunk = message.chunks.emplace_back();
+            chunk.name = "Traceback";
+            chunk.fields.emplace_back(Field { .name = "executionFlag", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "pipelineUid", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "markerHashes32", .type = "array", .attributes = { { { "element", "uint32" }, { "length", std::to_string(kMaxExecutionInfoMarkerCount) } } } });
+            chunk.fields.emplace_back(Field { .name = "queueUid", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "kernelLaunchX", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "kernelLaunchY", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "kernelLaunchZ", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "threadX", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "threadY", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "threadZ", .type = "uint32" });
+
+            // Add helper for model translation
+            chunk.extraCS << "\t\t\tpublic Traceback GetModel() {\n";
+            chunk.extraCS << "\t\t\t\treturn new Traceback() {\n";
+
+            // Translate each field
+            for (const Field& value: chunk.fields) {
+                chunk.extraCS << "\t\t\t\t\t" << value.name << " = ";
+
+                if (value.name == "executionFlag") {
+                    chunk.extraCS << "(ExecutionFlag)";
+                }
+                
+                chunk.extraCS << value.name << ",\n";
+            }
+
+            // Close helper
+            chunk.extraCS << "\t\t\t\t};\n";
+            chunk.extraCS << "\t\t\t}\n";
         }
     }
 
@@ -277,6 +316,11 @@ bool ShaderExportGenerator::GenerateCPP(const Message &message, MessageStream &o
                     std::cerr << "Malformed command in line: " << message.line << ", type " << field.type << " not supported for chunk writes" << std::endl;
                     return false;
                 }
+            }
+            
+            // Dangling dword? (must be aligned)
+            if (bitOffset == 32) {
+                out.types << "\t\t\t\toffset++;\n";
             }
 
             // Next!

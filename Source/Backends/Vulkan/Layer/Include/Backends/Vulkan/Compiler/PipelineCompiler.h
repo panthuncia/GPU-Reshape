@@ -43,11 +43,17 @@ struct DispatcherBucket;
 struct DeviceDispatchTable;
 
 struct PipelineJob {
+    /// State we're instrumenting for
     PipelineState* state{ nullptr };
 
+    /// All instrumentation keys
     /// TODO: Stack fallback
     uint64_t* pipelineLibraryInstrumentationKeys{nullptr};
     ShaderModuleInstrumentationKey* shaderModuleInstrumentationKeys{nullptr};
+
+    /// Feature table of the job
+    /// Populated by the job
+    IL::FeatureTable combinedFeatureTable;
 
     /// Pipeline specific hash
     uint64_t combinedHash{ 0 };
@@ -88,17 +94,19 @@ protected:
     /// Compile a given job
     void CompileGraphics(const PipelineJobBatch& job);
     void CompileCompute(const PipelineJobBatch& job);
+    void CompileRaytracing(const PipelineJobBatch& job);
 
     /// Worker entry
     void WorkerGraphics(void* userData);
     void WorkerCompute(void* userData);
+    void WorkerRaytracing(void* userData);
 
     /// Set the shader module object
     /// \param createInfo the assigned creation info
     /// \param state the proxy state object
     /// \param key the instrumentation key to query
     /// \return success state
-    bool SetShaderModuleObject(VkPipelineShaderStageCreateInfo &createInfo, ShaderModuleState *state, const ShaderModuleInstrumentationKey &key);
+    bool SetShaderModuleObject(VkPipelineShaderStageCreateInfo &createInfo, ShaderModuleState *state, const ShaderModuleInstrumentationKey &key, IL::FeatureTable& combinedFeatureTable);
 
 private:
     DeviceDispatchTable* table{nullptr};
@@ -109,6 +117,7 @@ private:
     /// Job buckets
     std::vector<PipelineJob> graphicsJobs;
     std::vector<PipelineJob> computeJobs;
+    std::vector<PipelineJob> raytracingJobs;
 
     /// Async dispatcher
     ComRef<Dispatcher> dispatcher{nullptr};

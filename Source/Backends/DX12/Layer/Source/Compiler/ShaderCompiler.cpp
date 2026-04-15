@@ -87,11 +87,11 @@ bool ShaderCompiler::Install() {
 
     // Get number of resources
     uint32_t resourceCount;
-    shaderDataHost->Enumerate(&resourceCount, nullptr, ShaderDataType::All);
+    shaderDataHost->EnumerateShader(&resourceCount, nullptr, ShaderDataType::AllGlobal);
 
     // Fill resources
     shaderData.resize(resourceCount);
-    shaderDataHost->Enumerate(&resourceCount, shaderData.data(), ShaderDataType::All);
+    shaderDataHost->EnumerateShader(&resourceCount, shaderData.data(), ShaderDataType::AllGlobal);
 
     // Get the signers
     dxilSigner = registry->Get<DXILSigner>();
@@ -117,6 +117,11 @@ void ShaderCompiler::Worker(void *data) {
     if (!CompileShader(*job)) {
         job->state->RemoveInstrument(job->instrumentationKey);
     }
+
+    // Cleanup keys
+    if (job->instrumentationKey.localKeys) {
+        destroy(job->instrumentationKey.localKeys, allocators);
+    }
     
     destroy(job, allocators);
 }
@@ -124,7 +129,10 @@ void ShaderCompiler::Worker(void *data) {
 bool ShaderCompiler::InitializeModule(ShaderState *state) {
     // Instrumented pipelines are unique, however, originating modules may not be
     std::lock_guard moduleGuad(state->mutex);
+    return InitializeModuleNoLock(state);
+}
 
+bool ShaderCompiler::InitializeModuleNoLock(ShaderState *state) {
     // Create the module on demand
     if (state->module) {
         return true;
@@ -188,6 +196,9 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
     // Create a copy of the module, don't modify the source
     IDXModule *module = job.state->module->Copy();
 
+    // Assign the instrumentation hash, may be used within features for tracking
+    module->GetProgram()->SetShaderInstrumentationHash(job.instrumentationKey.combinedHash);
+
     // Debugging
     std::filesystem::path debugPath;
     if (debug) {
@@ -208,7 +219,7 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
 
     // Pre-injection
     for (size_t i = 0; i < shaderFeatures.size(); i++) {
-        if (!(job.instrumentationKey.featureBitSet & (1ull << i))) {
+        if (!(job.instrumentationKey.featureBitSet & (1ull << i)) || !shaderFeatures[i]) {
             continue;
         }
 
@@ -218,7 +229,7 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
 
     // Pass through all features
     for (size_t i = 0; i < shaderFeatures.size(); i++) {
-        if (!(job.instrumentationKey.featureBitSet & (1ull << i))) {
+        if (!(job.instrumentationKey.featureBitSet & (1ull << i)) || !shaderFeatures[i]) {
             continue;
         }
 
@@ -235,7 +246,8 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
     compileJob.messages = scope;
 
     // Instrumented data
-    DXStream stream(allocators);
+    ShaderInstrument shaderInstrument(allocators);
+    shaderInstrument.featureTable = module->GetProgram()->GetFeatureTable();
 
     // Debugging
     if (!debugPath.empty()) {
@@ -244,7 +256,7 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
     }
 
     // Attempt to recompile
-    if (!module->Compile(compileJob, stream)) {
+    if (!module->Compile(compileJob, shaderInstrument.stream)) {
         ++job.diagnostic->failedJobs;
         return false;
     }
@@ -256,7 +268,7 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
     }
 
     // Assign the instrument
-    job.state->AddInstrument(job.instrumentationKey, stream);
+    job.state->AddInstrument(job.instrumentationKey, new (allocators) ShaderInstrument(shaderInstrument));
 
     // Mark as passed
     ++job.diagnostic->passedJobs;

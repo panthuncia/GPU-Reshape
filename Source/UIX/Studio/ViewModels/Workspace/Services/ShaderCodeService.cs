@@ -27,6 +27,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Avalonia.Threading;
 using Message.CLR;
 using Runtime.ViewModels.Shader;
@@ -78,32 +79,44 @@ namespace Studio.ViewModels.Workspace.Services
                             // Try to get the view model
                             if (!_pendingShaderViewModels.TryGetValue(shaderCode.shaderUID, out PendingEntry? entry) || entry.ShaderViewModel == null)
                             {
+                                Studio.Logging.Error($"Failed to get shader view model for {shaderCode.shaderUID}");
                                 continue;
                             }
 
                             // Final status
-                            AsyncShaderStatus status;
+                            AsyncObjectStatus status;
                             
                             // Failed to find?
                             if (shaderCode.found == 0)
                             {
-                                status = AsyncShaderStatus.NotFound;
+                                status = AsyncObjectStatus.NotFound;
                             }
 
                             // Only native?
                             else if (shaderCode.native == 1 || shaderCode.fileCount == 0)
                             {
-                                status = AsyncShaderStatus.NoDebugSymbols;
+                                status = AsyncObjectStatus.NoDebugSymbols;
                             }
                             
                             // With debug symbols
                             else
                             {
-                                status = AsyncShaderStatus.DebugSymbols;
+                                status = AsyncObjectStatus.DebugSymbols;
                             }
+
+                            // Is the shader optimized?
+                            bool optimized = shaderCode.optimized == 1;
                             
                             // Update status
-                            Dispatcher.UIThread.InvokeAsync(() => { entry.ShaderViewModel.AsyncStatus |= status; });
+                            Dispatcher.UIThread.InvokeAsync(() =>
+                            {
+                                entry.ShaderViewModel.AsyncStatus |= status;
+
+                                if (status != AsyncObjectStatus.NotFound)
+                                {
+                                    entry.ShaderViewModel.IsOptimized = optimized;
+                                }
+                            });
                             break;
                         }
                         case ShaderCodeFileMessage.ID:
@@ -119,6 +132,7 @@ namespace Studio.ViewModels.Workspace.Services
                             // Try to get the view model
                             if (!_pendingShaderViewModels.TryGetValue(shaderCode.shaderUID, out PendingEntry? entry) || entry.ShaderViewModel == null)
                             {
+                                Studio.Logging.Error($"Failed to get shader view model for {shaderCode.shaderUID}");
                                 continue;
                             }
 
@@ -127,7 +141,7 @@ namespace Studio.ViewModels.Workspace.Services
                             string code = shaderCode.code.String;
                             string filename = shaderCode.filename.String;
 
-                            _pendingShaderFiles.GetOrDefault(entry.ShaderViewModel).Add(new ShaderFileViewModel()
+                            _pendingShaderFiles.GetOrAddDefault(entry.ShaderViewModel).Add(new ShaderFileViewModel()
                             {
                                 Contents = code,
                                 UID = fileUID,
@@ -142,24 +156,30 @@ namespace Studio.ViewModels.Workspace.Services
                             // Try to get the view model
                             if (!_pendingShaderViewModels.TryGetValue(shaderCode.shaderUID, out PendingEntry? entry) || entry.ShaderViewModel == null)
                             {
+                                Studio.Logging.Error($"Failed to get shader view model for {shaderCode.shaderUID}");
                                 continue;
                             }
 
                             // Found?
                             if (shaderCode.found == 0)
                             {
-                                UInt64 uid = shaderCode.shaderUID;
-
-                                // Set contents
+                                Studio.Logging.Error($"Failed to pool shader IL for {shaderCode.shaderUID}");
                                 Dispatcher.UIThread.InvokeAsync(() => { entry.ShaderViewModel.Program = null; });
                                 continue;
                             }
 
-                            // Parse program
-                            Models.IL.Program? program = new Models.IL.Parser().Parse(shaderCode.program.String);
+                            // Message escapes the thread
+                            string reference = shaderCode.program.String;
 
-                            // Copy contents
-                            Dispatcher.UIThread.InvokeAsync(() => { entry.ShaderViewModel.Program = program; });
+                            // Programs can get incredibly complex, schedule it on a worker thread
+                            ThreadPool.QueueUserWorkItem(_ =>
+                            {
+                                // Parse program
+                                Models.IL.Program program = new Models.IL.Parser().Parse(reference);
+
+                                // Copy contents
+                                Dispatcher.UIThread.InvokeAsync(() => { entry.ShaderViewModel.Program = program; });
+                            });
                             break;
                         }
                         case ShaderBlockGraphMessage.ID:
@@ -169,6 +189,7 @@ namespace Studio.ViewModels.Workspace.Services
                             // Try to get the view model
                             if (!_pendingShaderViewModels.TryGetValue(shaderCode.shaderUID, out PendingEntry? entry) || entry.ShaderViewModel == null)
                             {
+                                Studio.Logging.Error($"Failed to get shader view model for {shaderCode.shaderUID}");
                                 continue;
                             }
 
@@ -217,8 +238,7 @@ namespace Studio.ViewModels.Workspace.Services
         /// <summary>
         /// Enqueue a request for shader contents
         /// </summary>
-        /// <param name="shaderViewModel"></param>
-        public void EnqueueShaderContents(ShaderViewModel shaderViewModel)
+        public void EnqueueShaderContents(ShaderViewModel shaderViewModel, bool deferred)
         {
             lock (this)
             {
@@ -234,11 +254,12 @@ namespace Studio.ViewModels.Workspace.Services
                 // Update entry
                 entry.State |= ShaderCodePoolingState.Contents;
                 entry.ShaderViewModel = shaderViewModel;
-
+                
                 // Add request
                 var request = ConnectionViewModel.GetSharedBus().Add<GetShaderCodeMessage>();
                 request.poolCode = 1;
                 request.shaderUID = shaderViewModel.GUID;
+                request.deferred = deferred ? 1 : 0;
             }
         }
 
@@ -297,6 +318,31 @@ namespace Studio.ViewModels.Workspace.Services
         }
 
         /// <summary>
+        /// Enqueue the release of an externally held shader, must be owned
+        /// </summary>
+        public void EnqueueReleaseShader(ShaderViewModel shaderViewModel)
+        {
+            lock (this)
+            {
+                // Get entry
+                PendingEntry entry = GetEntry(shaderViewModel.GUID);
+
+                // Valid or already released?
+                if (ConnectionViewModel == null || !entry.HasExternalReference)
+                {
+                    return;
+                }
+
+                // Update entry
+                entry.HasExternalReference = false;
+
+                // Add release
+                var request = ConnectionViewModel.GetSharedBus().Add<ReleaseShaderMessage>();
+                request.shaderUID = shaderViewModel.GUID;
+            }
+        }
+
+        /// <summary>
         /// Get an existing entry
         /// </summary>
         /// <param name="guid"></param>
@@ -326,6 +372,11 @@ namespace Studio.ViewModels.Workspace.Services
             /// Current pooling state
             /// </summary>
             public ShaderCodePoolingState State;
+
+            /// <summary>
+            /// Assume there's always an external reference, up to the caller if this is valid
+            /// </summary>
+            public bool HasExternalReference = true;
 
             /// <summary>
             /// Parent view model

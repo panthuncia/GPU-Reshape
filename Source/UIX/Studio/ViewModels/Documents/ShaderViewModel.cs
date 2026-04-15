@@ -37,6 +37,7 @@ using Runtime.ViewModels.Shader;
 using Runtime.ViewModels.Traits;
 using Studio.Extensions;
 using Studio.Models.Workspace.Objects;
+using Studio.Services;
 using Studio.ViewModels.Shader;
 using Studio.ViewModels.Workspace.Properties;
 using Studio.ViewModels.Workspace.Services;
@@ -139,6 +140,15 @@ namespace Studio.ViewModels.Documents
         }
 
         /// <summary>
+        /// Is this shader optimized?
+        /// </summary>
+        public bool IsOptimized
+        {
+            get => _isOptimized;
+            set => this.RaiseAndSetIfChanged(ref _isOptimized, value);
+        }
+
+        /// <summary>
         /// All view models
         /// </summary>
         public ObservableCollection<IShaderContentViewModel> ShaderContentViewModels { get; } = new();
@@ -163,19 +173,22 @@ namespace Studio.ViewModels.Documents
                 {
                     // Bind properties
                     this.BindProperty(x => x.PropertyCollection, x => shaderContentViewModel.PropertyCollection = x);
-                    this.BindProperty(x => x.Object, x => shaderContentViewModel.Object = x);
+                    this.BindProperty(x => x.Object, x => shaderContentViewModel.Content = x);
 
                     // Bind active state change
                     shaderContentViewModel
                         .WhenAnyValue(x => x.IsActive)
                         .Subscribe(x => OnSetContentViewModel(shaderContentViewModel, x));
+                    
+                    // Install the extensions
+                    ServiceRegistry.Get<IEditorService>()?.InstallViewModel(shaderContentViewModel);
                 })
                 .Subscribe();
             
             // Default view models
             ShaderContentViewModels.AddRange(new IShaderContentViewModel[]
             {
-                new CodeShaderContentViewModel()
+                new CodeContentViewModel()
                 {
                     NavigationContext = this
                 },
@@ -188,7 +201,7 @@ namespace Studio.ViewModels.Documents
                     NavigationContext = this
                 }
             });
-            
+
             // Selected
             ShaderContentViewModels[0].IsActive = true;
         }
@@ -233,6 +246,9 @@ namespace Studio.ViewModels.Documents
                 }
             });
 
+            // Bind the properties
+            _object!.BindProperty(x => x.IsOptimized, x => IsOptimized = x);
+            
             // Bind files
             _object!.FileViewModels
                 .ToObservableChangeSet()
@@ -243,15 +259,18 @@ namespace Studio.ViewModels.Documents
             _object.WhenAnyValue(x => x.AsyncStatus).Subscribe(x =>
             {
                 // Ready?
-                Ready = x != AsyncShaderStatus.Pending;
+                Ready = x != AsyncObjectStatus.Pending;
 
                 // Switch to IL content view if there's no debug symbols
                 // Or, if the startup location doesn't have a source mapping
-                if (x == AsyncShaderStatus.NoDebugSymbols || _descriptor?.StartupLocation?.Location.FileUID == ShaderLocation.InvalidFileUID)
+                if (x == AsyncObjectStatus.NoDebugSymbols || _descriptor?.StartupLocation?.Location.FileUID == ShaderLocation.InvalidFileUID)
                 {
                     SelectedShaderContentViewModel = ShaderContentViewModels.First(scvm => scvm is ILShaderContentViewModel);
                 }
             });
+            
+            // Update content objects
+            ShaderContentViewModels.ForEach(x => x.Content = _object);
         }
 
         /// <summary>
@@ -260,7 +279,7 @@ namespace Studio.ViewModels.Documents
         private void OnFileAdded(ShaderFileViewModel file)
         {
             // Only for code navigation
-            if (SelectedShaderContentViewModel is not CodeShaderContentViewModel)
+            if (SelectedShaderContentViewModel is not CodeContentViewModel)
             {
                 return;
             }
@@ -392,5 +411,10 @@ namespace Studio.ViewModels.Documents
         /// Internal ready state
         /// </summary>
         private bool _ready;
+
+        /// <summary>
+        /// Internal optimized state
+        /// </summary>
+        private bool _isOptimized;
     }
 }

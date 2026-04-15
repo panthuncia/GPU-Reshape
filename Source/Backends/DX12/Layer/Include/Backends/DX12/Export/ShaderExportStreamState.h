@@ -32,30 +32,35 @@
 #include <Backends/DX12/States/ImmediateCommandList.h>
 #include <Backends/DX12/Export/ShaderExportDescriptorInfo.h>
 #include <Backends/DX12/Export/ShaderExportConstantAllocator.h>
+#include <Backends/DX12/Export/ShaderExportDeviceAllocator.h>
 #include <Backends/DX12/Controllers/Versioning.h>
 #include <Backends/DX12/ShaderData/ConstantShaderDataBuffer.h>
+#include <Backends/DX12/Export/ShaderExportOwnedHeapAllocator.h>
 
 // Backend
 #include <Backend/CommandContextHandle.h>
 #include <Backend/CommandContext.h>
+#include <Backend/IL/Execution/ExecutionInfo.h>
 
 // Common
-#include <Common/Containers/BucketPoolAllocator.h>
 #include <Common/Containers/LinearBlockAllocator.h>
 
 // Std
 #include <vector>
-#include <Backends/DX12/Resource/DescriptorDataSegment.h>
 
 // Forward declarations
 struct RootSignatureState;
 struct ShaderExportSegmentInfo;
+struct ShaderExportStreamStateRaytracingCache;
+struct ShaderExportStreamStateBarrierTracking;
+struct VirtualAddressMappingTablePersistentVersion;
 struct IncrementalFence;
 class ShaderExportFixedTwoSidedDescriptorAllocator;
 struct FenceState;
 struct PipelineState;
 class DescriptorDataAppendAllocator;
 struct DescriptorHeapState;
+struct ShaderExportStreamSegment;
 
 /// Tracked descriptor allocation
 struct ShaderExportSegmentDescriptorAllocation {
@@ -174,6 +179,56 @@ struct ShaderExportSegmentDescriptorEntry {
     ShaderExportSegmentDescriptorAllocation segment{};
 };
 
+#ifndef NDEBUG
+struct ShaderExportStreamStateDebugStream {
+    /// Identifying name
+    std::string name;
+
+    /// Resource to be mapped
+    ID3D12Resource* resource{nullptr};
+
+    /// Offset to map from
+    uint64_t offset{0};
+
+    /// Number of bytes to map from the offset
+    uint64_t length{0};
+};
+#endif // NDEBUG
+
+struct ShaderExportStreamStateBackendMessages {
+    /// Optional, allocated if the application requires patching that needs feedback
+    Allocation allocation;
+
+    /// If true, requires initialization before use
+    bool pendingInitialization = true;
+};
+
+struct ShaderExportStreamViewportState {
+    /// Currently set viewport
+    D3D12_VIEWPORT state{};
+
+    /// Assigned uid
+    uint32_t rollingUID{0};
+};
+
+struct ShaderExportStreamMarkerEntryState {
+    /// Is this hierarhical?
+    bool hierarchical = false;
+
+    /// CRC32 hash
+    uint32_t hash32{0};
+};
+
+struct ShaderExportStreamMarkerState {
+    /// All markers
+    TrivialStackVector<ShaderExportStreamMarkerEntryState, kMaxExecutionInfoMarkerCount> stack;
+};
+
+struct ShaderExportStreamPersistentState {
+    /// All host descriptor handles
+    TrivialStackVector<D3D12_CPU_DESCRIPTOR_HANDLE, 4u> vamtVersionDescriptorHandles;
+};
+
 /// Single stream state
 struct ShaderExportStreamState {
     ShaderExportStreamState(const Allocators& allocators) : segmentDescriptors(allocators), referencedHeaps(allocators) {
@@ -202,14 +257,20 @@ struct ShaderExportStreamState {
     /// Graphics render pass
     ShaderExportRenderPassState renderPass;
 
+    /// Currently set viewport
+    ShaderExportStreamViewportState viewport;
+
+    /// Currently set markers
+    ShaderExportStreamMarkerState markers;
+    
     /// Currently bound pipeline
     const PipelineState* pipeline{nullptr};
 
     /// Currently instrumented pipeline
-    ID3D12PipelineState* pipelineObject{nullptr};
+    IUnknown* pipelineObject{nullptr};
 
-    /// Is the current pipeline instrumented?
-    bool isInstrumented{false};
+    /// Current pipeline instrument, null if not instrumented
+    PipelineInstrument* pipelineInstrument{nullptr};
 
     /// All segment descriptors, lifetime bound to deferred segment
     Vector<ShaderExportSegmentDescriptorEntry> segmentDescriptors;
@@ -221,10 +282,40 @@ struct ShaderExportStreamState {
     ConstantShaderDataBuffer constantShaderDataBuffer;
 
     /// Shared constants allocator
+    /// Useful for small transient allocations
     ShaderExportConstantAllocator constantAllocator;
+
+    /// Shared device allocator
+    /// Useful for larger, stateful allocations
+    ShaderExportDeviceAllocator deviceAllocator;
+
+    /// Shared heap allocator
+    /// Useful for larger descriptor allocations that shouldnt pollute the small reserved region
+    /// Does however require user heap reconstruction when used
+    ShaderExportOwnedHeapAllocator heapAllocator;
+
+    /// Per-state barrier tracking for cache invalidation, allocated on demand
+    ShaderExportStreamStateBarrierTracking* barrierTracking{nullptr};
+
+    /// Per-state caches, allocated on demand
+    ShaderExportStreamStateRaytracingCache* raytracingCache{nullptr};
+
+    /// All backend messages
+    ShaderExportStreamStateBackendMessages backendMessages;
+    
+    /// All persistent state
+    ShaderExportStreamPersistentState persistentState;
 
     /// Top level context handle
     CommandContextHandle commandContextHandle{kInvalidCommandContextHandle};
+
+    /// The segment that currently references this state
+    ShaderExportStreamSegment* segment{nullptr};
+
+#ifndef NDEBUG
+    /// All pending debug streams
+    std::vector<ShaderExportStreamStateDebugStream> debugStreams;
+#endif // NDEBUG
 };
 
 struct ShaderExportStreamSegmentUserContext {
@@ -264,11 +355,17 @@ struct ShaderExportStreamSegment {
     ShaderExportStreamSegmentUserContext userPreContext;
     ShaderExportStreamSegmentUserContext userPostContext;
 
+    /// All referenced streaming states
+    std::vector<ShaderExportStreamState*> streamStates;
+
     /// The next fence commit id to be waited for
     uint64_t fenceNextCommitId{UINT64_MAX};
 
     /// Synchronization fence (optional)
     IncrementalFence* fence{nullptr};
+    
+    /// Persistent versions
+    VirtualAddressMappingTablePersistentVersion* vamtPersistentVersion{nullptr};
 
     /// Segmentation point during submission
     VersionSegmentationPoint versionSegPoint{};

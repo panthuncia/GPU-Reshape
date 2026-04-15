@@ -35,6 +35,9 @@
 #include <Backend/IL/TypeCommon.h>
 #include <Backend/IL/Emitters/ResourceTokenEmitter.h>
 #include <Backend/IL/InstructionValueCommon.h>
+#include <Backend/IL/Instrumentation/ValidationCoverage.h>
+#include <Backend/IL/Instrumentation/Traceback.h>
+#include <Backend/ShaderData/ShaderDataValidationCoverage.h>
 
 // Generated schema
 #include <Schemas/Features/ResourceBounds.h>
@@ -61,6 +64,9 @@ bool ResourceBoundsFeature::Install() {
     // Optional sguid host
     sguidHost = registry->Get<IShaderSGUIDHost>();
 
+    // Coverage host buffers
+    dataValidationCoverage = registry->Get<ShaderDataValidationCoverage>();
+
     // OK
     return true;
 }
@@ -84,6 +90,9 @@ void ResourceBoundsFeature::Inject(IL::Program &program, const MessageStreamView
     // Unsigned target type
     const Backend::IL::Type* uint32Type = program.GetTypeMap().FindTypeOrAdd(Backend::IL::IntType {.bitWidth = 32, .signedness = false});
 
+    // Get the coverage id, if enabled
+    IL::ID coverageBufferID = IL::GetValidationCoverageBufferID(program, config, dataValidationCoverage);
+    
     // Visit all instructions
     IL::VisitUserInstructions(program, [&](IL::VisitContext& context, IL::BasicBlock::Iterator it) -> IL::BasicBlock::Iterator {
         bool isTexture;
@@ -156,6 +165,9 @@ void ResourceBoundsFeature::Inject(IL::Program &program, const MessageStreamView
         // Out of bounds block
         IL::Emitter<> oob(program, *context.function.GetBasicBlocks().AllocBlock());
         oob.AddBlockFlag(BasicBlockFlag::NoInstrumentation);
+
+        // If coverage, store it
+        IL::StoreValidationCoverage(oob, coverageBufferID, sguid);
 
         // Setup message
         ResourceIndexOutOfBoundsMessage::ShaderExport msg;
@@ -248,6 +260,11 @@ void ResourceBoundsFeature::Inject(IL::Program &program, const MessageStreamView
             }
         }
 
+        // Write traceback data
+        if (config.traceback) {
+            IL::AppendTracebackChunk<ResourceIndexOutOfBoundsMessage>(msg, oob);
+        }
+
         // Export the message
         oob.Export(exportID, msg);
 
@@ -313,6 +330,9 @@ void ResourceBoundsFeature::Inject(IL::Program &program, const MessageStreamView
                 break;
             }
         }
+
+        // If coverage, limit it
+        cond = IL::ApplyValidationCoverage(pre, coverageBufferID, sguid, cond);
 
         // If so, branch to failure, otherwise resume
         pre.BranchConditional(cond, oob.GetBasicBlock(), resumeBlock, IL::ControlFlow::Selection(resumeBlock));

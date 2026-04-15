@@ -26,14 +26,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using Studio.ViewModels.Workspace;
 using Message.CLR;
-using Bridge.CLR;
 using GRS.Features.ResourceBounds.UIX.Workspace.Properties.Instrumentation;
 using ReactiveUI;
 using Runtime.Threading;
+using Runtime.Utils.Workspace;
 using Runtime.ViewModels.Workspace.Properties;
 using Studio.Models.Instrumentation;
 using Studio.Models.Workspace;
@@ -78,7 +79,7 @@ namespace GRS.Features.Descriptor.UIX.Workspace
             _messageCollectionViewModel = viewModel.PropertyCollection.GetProperty<IMessageCollectionViewModel>();
             
             // Get services
-            _shaderMappingService = viewModel.PropertyCollection.GetService<IShaderMappingService>();
+            _shaderMappingService = viewModel.PropertyCollection.GetService<IShaderSourceMappingService>();
             _versioningService = ViewModel.PropertyCollection.GetService<IVersioningService>();
         }
 
@@ -148,7 +149,7 @@ namespace GRS.Features.Descriptor.UIX.Workspace
                     var validationObject = new ValidationObject()
                     {
                         Content = contents,
-                        Severity = ValidationSeverity.Error,
+                        Severity = SourceObjectSeverity.Error,
                         Count = 1u
                     };
                     
@@ -180,17 +181,10 @@ namespace GRS.Features.Descriptor.UIX.Workspace
                     Dispatcher.UIThread.InvokeAsync(() => { _messageCollectionViewModel?.ValidationObjects.Add(validationObject); });
                 }
 
-                // Detailed?
-                if (message.HasChunk(DescriptorMismatchMessage.Chunk.Detail))
+                // Formatted?
+                // TODO: Optimize the hell out of this, current version is not good enough
+                if (message.IsChunked())
                 {
-                    DescriptorMismatchMessage.DetailChunk detailChunk = message.GetDetailChunk();
-
-                    // To token
-                    var token = new ResourceToken()
-                    {
-                        Token = detailChunk.token
-                    };
-
                     // Get detailed view model
                     if (!_reducedDetails.TryGetValue(message.Key, out ResourceValidationDetailViewModel? detailViewModel))
                     {
@@ -212,21 +206,53 @@ namespace GRS.Features.Descriptor.UIX.Workspace
                         // Add lookup
                         _reducedDetails.Add(message.Key, detailViewModel);
                     }
-
-                    // Try to find resource
-                    Resource resource = _versioningService?.GetResource(token.PUID, streams.VersionID) ?? new Resource()
-                    {
-                        PUID = token.PUID,
-                        Version = streams.VersionID,
-                        Name = $"#{token.PUID}",
-                        IsUnknown = true
-                    };
                     
-                    // Get resource
-                    ResourceValidationObject resourceValidationObject = detailViewModel.FindOrAddResource(resource);
+                    // Formatted message
+                    StringBuilder builder = new();
+                    builder.Append(_reducedMessages[message.Key].Content);
+                    
+                    // Destination resource
+                    Resource resource;
+                    
+                    // Detailed?
+                    if (message.HasChunk(DescriptorMismatchMessage.Chunk.Detail))
+                    {
+                        DescriptorMismatchMessage.DetailChunk detailChunk = message.GetDetailChunk();
 
-                    // Compose detailed message
-                    resourceValidationObject.AddUniqueInstance(_reducedMessages[message.Key].Content);
+                        // To token
+                        ResourceToken token = new()
+                        {
+                            Token = detailChunk.token
+                        };
+
+                        // Try to find resource
+                        resource = _versioningService?.GetResource(token.PUID, streams.VersionID) ?? new Resource()
+                        {
+                            PUID = token.PUID,
+                            Version = streams.VersionID,
+                            Name = $"#{token.PUID}",
+                            IsUnknown = true
+                        };
+                    }
+                    else
+                    {
+                        resource = new Resource()
+                        {
+                            Name = "Unknown",
+                            IsUnknown = true
+                        };
+                    }
+
+                    // Handle traceback
+                    if (message.HasChunk(DescriptorMismatchMessage.Chunk.Traceback))
+                    {
+                        DescriptorMismatchMessage.TracebackChunk tracebackChunk = message.GetTracebackChunk();
+                        builder.Append($" at {TracebackUtils.Format(ViewModel, tracebackChunk.GetModel())}");
+                    }
+
+                    // Append message on resource
+                    ResourceValidationObject resourceValidationObject = detailViewModel.FindOrAddResource(resource);
+                    resourceValidationObject.AddUniqueInstance(builder.ToString());
                 }
             }
             
@@ -296,7 +322,7 @@ namespace GRS.Features.Descriptor.UIX.Workspace
         /// <summary>
         /// Segment mapping
         /// </summary>
-        private IShaderMappingService? _shaderMappingService;
+        private IShaderSourceMappingService? _shaderMappingService;
 
         /// <summary>
         /// Validation container

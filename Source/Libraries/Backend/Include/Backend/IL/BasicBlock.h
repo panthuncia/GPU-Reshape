@@ -42,6 +42,9 @@
 #undef OPAQUE
 
 namespace IL {
+    /// Forward declarations
+    struct Function;
+
     /// Instruction reference
     /// \tparam T instruction type
     /// \tparam OPAQUE opaque reference type
@@ -117,8 +120,13 @@ namespace IL {
             /// Comparison
             bool operator!=(const Iterator &other) const {
                 Validate();
-
                 return ptr != other.ptr;
+            }
+
+            /// Comparison
+            bool operator==(const Iterator &other) const {
+                Validate();
+                return ptr == other.ptr;
             }
 
             /// Get the instruction
@@ -319,8 +327,13 @@ namespace IL {
             /// Comparison
             bool operator!=(const ConstIterator &other) const {
                 Validate();
-
                 return ptr != other.ptr;
+            }
+
+            /// Comparison
+            bool operator==(const ConstIterator &other) const {
+                Validate();
+                return ptr == other.ptr;
             }
 
             /// Get the instruction
@@ -510,6 +523,16 @@ namespace IL {
         /// \return true if present
         bool HasFlag(BasicBlockFlag value) const {
             return flags & value;
+        }
+
+        /// Set the name of this block
+        void SetName(const char* value) {
+            name = value;
+        }
+
+        /// Get the name of this block
+        const char* GetName() const {
+            return name;
         }
 
         /// Append an instruction
@@ -862,6 +885,16 @@ namespace IL {
             return static_cast<const T*>(instruction);
         }
 
+        /// Set the owning function
+        void SetFunction(Function* value) {
+            function = value;
+        }
+
+        /// Get the function this block resides in
+        Function* GetFunction() const {
+            return function;
+        }
+
         /// Get the identifier map
         IdentifierMap& GetIdentifierMap() const {
             return map;
@@ -991,6 +1024,12 @@ namespace IL {
 
         /// Relocation block allocator
         RelocationAllocator relocationAllocator;
+
+        /// Name of this block
+        const char* name{nullptr};
+
+        /// Function this block exists in
+        Function* function{nullptr};
 
         /// Block flags
         mutable BasicBlockFlagSet flags{0};

@@ -35,19 +35,21 @@ namespace Studio.ViewModels.Workspace.Services
         /// <summary>
         /// Enqueue a shader for source code pooling
         /// </summary>
-        /// <param name="shaderViewModel"></param>
-        public void EnqueueShaderContents(Objects.ShaderViewModel shaderViewModel);
+        public void EnqueueShaderContents(Objects.ShaderViewModel shaderViewModel, bool deferred = false);
         
         /// <summary>
         /// Enqueue a shader for source code pooling
         /// </summary>
-        /// <param name="shaderViewModel"></param>
         public void EnqueueShaderIL(Objects.ShaderViewModel shaderViewModel);
         
         /// <summary>
         /// Enqueue a shader for source code pooling
         /// </summary>
-        /// <param name="shaderViewModel"></param>
         public void EnqueueShaderBlockGraph(Objects.ShaderViewModel shaderViewModel);
+
+        /// <summary>
+        /// Enqueue the release of an externally held shader, must be owned
+        /// </summary>
+        public void EnqueueReleaseShader(Objects.ShaderViewModel shaderViewModel);
     }
 }

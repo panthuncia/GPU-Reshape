@@ -25,11 +25,54 @@
 :: 
 
 @echo off
+setlocal EnableExtensions EnableDelayedExpansion
+
+set "VS_GENERATOR="
+set "VS_BUILD_DIR="
+set "BUILD_DIR="
+set "EXPECT_BUILD_DIR="
+
+cmake --help | findstr /C:"Visual Studio 18 2026" >NUL
+if not errorlevel 1 (
+    set "VS_GENERATOR=Visual Studio 18 2026"
+    set "VS_BUILD_DIR=cmake-build-vs2026"
+) else (
+    cmake --help | findstr /C:"Visual Studio 17 2022" >NUL
+    if not errorlevel 1 (
+        set "VS_GENERATOR=Visual Studio 17 2022"
+        set "VS_BUILD_DIR=cmake-build-vs2022"
+    ) else (
+        echo Failed!
+        echo.
+        echo Could not find a supported Visual Studio generator in CMake.
+        echo Expected one of:
+        echo   - Visual Studio 18 2026
+        echo   - Visual Studio 17 2022
+        exit /b 1
+    )
+)
+
+set "BUILD_DIR=%VS_BUILD_DIR%"
+for %%I in (%*) do (
+    if defined EXPECT_BUILD_DIR (
+        set "BUILD_DIR=%%~I"
+        set "EXPECT_BUILD_DIR="
+    ) else (
+        set "ARG_TOKEN=%%~I"
+        if /I "!ARG_TOKEN!"=="-B" (
+            set "EXPECT_BUILD_DIR=1"
+        ) else if /I "!ARG_TOKEN:~0,2!"=="-B" (
+            set "BUILD_DIR=!ARG_TOKEN:~2!"
+        )
+    )
+)
 
 rem Info
 echo GPU Reshape - Solution generator
 echo:
 echo For the full set of configuration switches and options, see the build documentation.
+echo Using generator: !VS_GENERATOR!
+echo Using build directory: !BUILD_DIR!
 echo:
 
 rem Print all generation inline in the command window
@@ -37,12 +80,11 @@ echo Generating from cmake...
 echo ------------------------
 echo:
 
-cmake^
-    -G "Visual Studio 17"^
-    -DCMAKE_CONFIGURATION_TYPES:STRING="Debug;Release;MinSizeRel;RelWithDebInfo"^
-    -DINSTALL_THIRD_PARTY:BOOL="1"^
-    -B "cmake-build-vs2022"^
-    %*
+if /I "!BUILD_DIR!"=="!VS_BUILD_DIR!" (
+    cmake -G "!VS_GENERATOR!" -A x64 -DCMAKE_CONFIGURATION_TYPES:STRING="Debug;Release;MinSizeRel;RelWithDebInfo" -DINSTALL_THIRD_PARTY:BOOL="1" -B "!BUILD_DIR!" %*
+) else (
+    cmake -G "!VS_GENERATOR!" -A x64 -DCMAKE_CONFIGURATION_TYPES:STRING="Debug;Release;MinSizeRel;RelWithDebInfo" -DINSTALL_THIRD_PARTY:BOOL="1" %*
+)
 	
 echo:
 echo -------------------------
@@ -57,5 +99,6 @@ if %ERRORLEVEL% == 0 (
 )
 
 echo|set /p="Solution patching... "
-cmake -P Build/Utils/CSProjPatch.cmake cmake-build-vs2022
+cmake -P Build/Utils/CSProjPatch.cmake !BUILD_DIR!
 echo OK!
+endlocal

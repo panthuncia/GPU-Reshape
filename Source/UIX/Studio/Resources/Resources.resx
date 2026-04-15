@@ -99,8 +99,14 @@
     <data name="Workspace_Configuration_Custom_Name" xml:space="preserve">
         <value>Custom</value>
     </data>
+    <data name="Workspace_Configuration_None_Name" xml:space="preserve">
+        <value>None</value>
+    </data>
     <data name="Workspace_Configuration_Custom_Description" xml:space="preserve">
         <value>Setup a custom workspace</value>
+    </data>
+    <data name="Workspace_Configuration_None_Description" xml:space="preserve">
+        <value>Setup a workspace without instrumentation</value>
     </data>
     <data name="Workspace_Configuration_Basic_Header" xml:space="preserve">
         <value>Basic configuration, includes</value>
@@ -155,7 +161,49 @@ Do you consent to this?</value>
     <data name="Launch_CaptureChildProcesses" xml:space="preserve">
         <value>Hook into the entire process tree of an application, automatically creates process hierarchy</value>
     </data>
+    <data name="Launch_SuspendDeferredInitialization" xml:space="preserve">
+        <value>Suspends the deferred initialization thread created on injection, this avoids some app-side TLS initialization order issues</value>
+    </data>
+    <data name="Launch_WaitForDebugger" xml:space="preserve">
+        <value>Launch and wait for the debugger</value>
+    </data>
     <data name="Launch_AttachAllDevices" xml:space="preserve">
         <value>Attach to all graphical devices the application creates, a workspace is automatically created per device</value>
+    </data>
+    <data name="Tool_Shaders" xml:space="preserve">
+        <value>All workspace shaders</value>
+    </data>
+    <data name="Tool_Pipelines" xml:space="preserve">
+        <value>All workspace pipelines</value>
+    </data>
+    <data name="Tool_Properties" xml:space="preserve">
+        <value>Instrumentation properties</value>
+    </data>
+    <data name="Tool_Workspaces" xml:space="preserve">
+        <value>All application workspaces</value>
+    </data>
+    <data name="Tool_Files" xml:space="preserve">
+        <value>Selected shader files</value>
+    </data>
+    <data name="Tool_Log" xml:space="preserve">
+        <value>Workspace logs</value>
+    </data>
+    <data name="ShaderView_Code" xml:space="preserve">
+        <value>Source code</value>
+    </data>
+    <data name="ShaderView_IL" xml:space="preserve">
+        <value>Instructions (GRIL)</value>
+    </data>
+    <data name="ShaderView_BlockGraph" xml:space="preserve">
+        <value>Basic block graph (GRIL)</value>
+    </data>
+    <data name="Launch_Coverage" xml:space="preserve">
+        <value>Enables coverage reporting, affects performance, reports each issue exactly once before moving on to the next</value>
+    </data>
+    <data name="Status_Active" xml:space="preserve">
+        <value>Recently in-use</value>
+    </data>
+    <data name="Status_Instrumented" xml:space="preserve">
+        <value>Currently instrumented</value>
     </data>
 </root>

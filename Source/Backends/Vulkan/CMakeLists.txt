@@ -98,6 +98,13 @@ set(
     vkCmdEndRendering
     vkCmdEndRenderingKHR
     vkCmdDrawMeshTasksEXT
+    vkCmdDispatchIndirect
+    vkCmdDrawIndexedIndirect
+    vkCmdDrawIndexedIndirectCount
+    vkCmdDrawIndirect
+    vkCmdDrawIndirectCount
+    vkCmdDrawMeshTasksIndirectEXT
+    vkCmdDrawMeshTasksIndirectCountEXT
 )
 
 # White list
@@ -134,14 +141,30 @@ set(
     vkCmdDrawMeshTasksEXT
     vkCmdDrawMeshTasksIndirectEXT
     vkCmdDrawMeshTasksIndirectCountEXT
+    vkCmdTraceRaysKHR
+    vkCmdBeginDebugUtilsLabelEXT
+    vkCmdEndDebugUtilsLabelEXT
+)
+
+# Generated hooks
+set(
+    VkManualProxies
+    vkCmdDispatchIndirect
+    vkCmdDrawIndexedIndirect
+    vkCmdDrawIndexedIndirectCount
+    vkCmdDrawIndirect
+    vkCmdDrawIndirectCount
+    vkCmdDrawMeshTasksIndirectEXT
+    vkCmdDrawMeshTasksIndirectCountEXT
 )
 
 # Join lists
 list(JOIN VkHooks "," VkHooksJoin)
 list(JOIN VkWhitelist "," VkWhitelistJoin)
+list(JOIN VkManualProxies "," VkManualProxiesJoin)
 
 # Object list
-set(VkObjects VkGraphicsPipelineCreateInfo,VkComputePipelineCreateInfo,VkShaderModuleCreateInfo,VkApplicationInfo,VkInstanceCreateInfo,VkDeviceCreateInfo,VkPipelineShaderStageCreateInfo,VkRenderPassCreateInfo2,VkRenderPassBeginInfo,VkDescriptorUpdateTemplateCreateInfo,VkDescriptorSetLayoutCreateInfo)
+set(VkObjects VkGraphicsPipelineCreateInfo,VkComputePipelineCreateInfo,VkShaderModuleCreateInfo,VkApplicationInfo,VkInstanceCreateInfo,VkDeviceCreateInfo,VkPipelineShaderStageCreateInfo,VkRenderPassCreateInfo2,VkRenderPassBeginInfo,VkDescriptorUpdateTemplateCreateInfo,VkDescriptorSetLayoutCreateInfo,VkRayTracingShaderGroupCreateInfoKHR,VkRayTracingPipelineCreateInfoKHR)
 
 # Generate the deep copy objects
 add_custom_command(
@@ -183,6 +206,7 @@ add_custom_command(
         -gentype commandbufferdispatchtable
         -o Layer/Include/Backends/Vulkan/CommandBufferDispatchTable.Gen.h
         -hook ${VkHooksJoin}
+        -manualproxy ${VkManualProxiesJoin}
         -whitelist ${VkWhitelistJoin}
 )
 
@@ -198,6 +222,7 @@ add_custom_command(
         -gentype commandbuffer
         -o Layer/Source/CommandBuffer.Gen.cpp
         -hook ${VkHooksJoin}
+        -manualproxy ${VkManualProxiesJoin}
         -whitelist ${VkWhitelistJoin}
 )
 
@@ -217,6 +242,7 @@ add_custom_command(
 
 # Inbuilt modules
 Project_AddHLSL(GeneratedInbuilt cs_6_0 "-Od" Layer/Modules/InbuiltTemplateModule.hlsl Layer/Include/Backends/Vulkan/Modules/InbuiltTemplateModule kSPIRVInbuiltTemplateModule)
+Project_AddHLSL(GeneratedInbuilt cs_6_0 "-O3" Layer/Modules/ShaderRecordPatching.hlsl Layer/Include/Backends/Vulkan/Modules/ShaderRecordPatching kShaderRecordPatching)
 
 # Create layer
 add_library(
@@ -225,8 +251,11 @@ add_library(
     Layer/Source/DeviceDispatchTable.cpp
     Layer/Source/InstanceDispatchTable.cpp
     Layer/Source/Device.cpp
+    Layer/Source/DeviceStateVote.cpp
+    Layer/Source/DeviceProperties.cpp
     Layer/Source/Instance.cpp
     Layer/Source/CommandBuffer.cpp
+    Layer/Source/Raytracing.cpp
     Layer/Source/DescriptorSet.cpp
     Layer/Source/ShaderModule.cpp
     Layer/Source/QueueSegment.cpp
@@ -248,8 +277,13 @@ add_library(
     Layer/Source/Controllers/VersioningController.cpp
     Layer/Source/Export/ShaderExportHost.cpp
     Layer/Source/Export/ShaderExportStreamAllocator.cpp
+    Layer/Source/Export/ShaderExportFreeDescriptorAllocator.cpp
     Layer/Source/Export/ShaderExportDescriptorAllocator.cpp
+    Layer/Source/Export/ShaderExportConstantAllocator.cpp
+    Layer/Source/Export/ShaderExportDeviceAllocator.cpp
     Layer/Source/Export/ShaderExportStreamer.cpp
+    Layer/Source/Programs/Programs.cpp
+    Layer/Source/Programs/RaytracingPrograms.cpp
     Layer/Source/Symbolizer/ShaderSGUIDHost.cpp
     Layer/Source/Scheduler/Scheduler.cpp
     Layer/Source/Compiler/SpvSourceMap.cpp
@@ -265,6 +299,7 @@ add_library(
     Layer/Source/Compiler/Utils/SpvUtilShaderDescriptorConstantData.cpp
     Layer/Source/Compiler/Utils/SpvUtilShaderConstantData.cpp
     Layer/Source/Compiler/Utils/SpvUtilShaderDebug.cpp
+    Layer/Source/Compiler/Utils/SpvUtilShaderExecution.cpp
     Layer/Source/Compiler/SpvPhysicalBlockScan.cpp
     Layer/Source/Compiler/SpvPhysicalBlockTable.cpp
     Layer/Source/ShaderData/ShaderDataHost.cpp
@@ -274,6 +309,8 @@ add_library(
     Layer/Source/Memory.cpp
     Layer/Source/ShaderProgram/ShaderProgramHost.cpp
     Layer/Source/Command/UserCommandBuffer.cpp
+    Layer/Source/IL/DeviceCommandEmitter.cpp
+    Layer/Source/IL/DebugEmitter.cpp
     Layer/Source/Debug.cpp
 
     # VMA implementation
@@ -310,6 +347,12 @@ target_link_libraries(
 target_include_directories(
     GRS.Backends.Vulkan.Layer PUBLIC
     Layer/Include ${CMAKE_CURRENT_BINARY_DIR}/Layer/Include
+)
+
+# Private include directories
+target_include_directories(
+    GRS.Backends.Vulkan.Layer PRIVATE
+    Layer/Modules
 )
 
 # Setup dependencies
@@ -436,3 +479,8 @@ add_dependencies(
     GRS.Backends.Vulkan.Tests
     GRS.Backends.Vulkan.Tests.UserDataLayer
 )
+
+if (TARGET VulkanCTS)
+    # Have the CTS build before when unit tests are enabled.
+    add_dependencies(GRS.Backends.Vulkan.Tests VulkanCTS)
+endif()

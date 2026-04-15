@@ -242,6 +242,15 @@ namespace Backend::IL {
             case KernelValue::FlattenedLocalThreadID: {
                 return program.GetTypeMap().FindTypeOrAdd(IntType { .bitWidth = 32, .signedness = false });
             }
+            case KernelValue::PixelPosition: {
+                return program.GetTypeMap().FindTypeOrAdd(VectorType{
+                    .containedType = program.GetTypeMap().FindTypeOrAdd(FPType { .bitWidth = 32 }),
+                    .dimension = 4
+                });
+            }
+            case KernelValue::VertexID: {
+                return program.GetTypeMap().FindTypeOrAdd(IntType { .bitWidth = 32, .signedness = false });
+            }
         }
     }
 
@@ -390,6 +399,10 @@ namespace Backend::IL {
         return program.GetTypeMap().GetResourceToken();
     }
 
+    inline const Type* ResultOf(Program& program, const ExecutionInfoInstruction* instr) {
+        return program.GetTypeMap().GetExecutionInfo();
+    }
+
     inline const Type* ResultOf(Program& program, const ResourceSizeInstruction* instr) {
         const Type* resource = program.GetTypeMap().GetType(instr->resource);
         if (!resource) {
@@ -530,5 +543,9 @@ namespace Backend::IL {
         }
 
         return type;
+    }
+
+    inline const Type* ResultOf(Program& program, const InsertInstruction* instr) {
+        return program.GetTypeMap().GetType(instr->composite);
     }
 }

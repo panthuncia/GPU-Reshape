@@ -28,18 +28,42 @@
 
 // Layer
 #include "DXSourceAssociation.h"
+#include "DXDwarf.h"
+
+// Backend
+#include <Backend/IL/TypeMap.h>
 
 // Std
+#include <span>
 #include <string_view>
+
+/// Forward declarations
+namespace IL {
+    struct Function;
+}
 
 class IDXDebugModule {
 public:
     virtual ~IDXDebugModule() = default;
 
     /// Get the source association from a given code offset
+    /// \param function the owning function to lookup for
     /// \param codeOffset the instruction (i.e. record) code offset
     /// \return default if failed
-    virtual DXSourceAssociation GetSourceAssociation(uint32_t codeOffset) = 0;
+    virtual DXSourceAssociation GetSourceAssociation(const IL::Function* function, uint32_t codeOffset) = 0;
+
+    /// Get the instruction associations
+    /// @param fileUID file to query for
+    /// @param line the line in question
+    /// @return may be empty
+    virtual std::span<DXInstructionAssociation> GetInstructionAssociations(uint16_t fileUID, uint32_t line) = 0;
+
+    /// Get the dward info
+    /// \param typeMap map to insert into
+    /// \param function the owning function to lookup for
+    /// \param codeOffset the instruction (i.e. record) code offset
+    /// @return default if failed
+    virtual DXDwarfInfo GetDwarfInfo(Backend::IL::TypeMap& typeMap, const IL::Function* function, uint32_t codeOffset) = 0;
 
     /// Get a source view of a line
     /// \param fileUID originating file uid

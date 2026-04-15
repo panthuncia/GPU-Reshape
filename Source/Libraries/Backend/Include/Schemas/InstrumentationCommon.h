@@ -33,5 +33,7 @@
 inline SetInstrumentationConfigMessage& operator|=(SetInstrumentationConfigMessage& lhs, const SetInstrumentationConfigMessage& rhs) {
     lhs.safeGuard |= rhs.safeGuard;
     lhs.detail |= rhs.detail;
+    lhs.validationCoverage |= rhs.validationCoverage;
+    lhs.traceback |= rhs.traceback;
     return lhs;
 }

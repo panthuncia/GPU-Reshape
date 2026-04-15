@@ -25,19 +25,14 @@
 // 
 
 using System;
-using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.ApplicationLifetimes;
-using Avalonia.Interactivity;
-using Avalonia.Markup.Xaml;
 using ReactiveUI;
 using Studio.Services;
 using Studio.ViewModels.Controls;
-using Studio.ViewModels.Workspace;
-using System.Reactive.Linq;
 using Runtime.ViewModels.Shader;
 using Studio.Extensions;
-using Studio.ViewModels.Workspace.Properties;
+using Studio.ViewModels.Code;
+using Studio.ViewModels.Documents;
 
 namespace Studio.Views.Tools
 {
@@ -63,14 +58,34 @@ namespace Studio.Views.Tools
                 return;
             
             // Get service
-            var service = ServiceRegistry.Get<IWorkspaceService>();
-            if (service?.SelectedShader == null)
+            if (ServiceRegistry.Get<IWorkspaceService>() is not { } service)
+                return;
+
+            // Must be file tree item
+            if (_object is not FileTreeItemViewModel itemViewModel)
                 return;
 
             // Shader file?
-            if (_object is FileTreeItemViewModel { ViewModel: ShaderFileViewModel shaderFileViewModel})
+            if (itemViewModel is { ViewModel: ShaderFileViewModel shaderFileViewModel})
             {
-                service.SelectedShader.SelectedFile = shaderFileViewModel;
+                if (service.SelectedShader != null)
+                {
+                    service.SelectedShader.SelectedFile = shaderFileViewModel;
+                }
+            }
+            
+            // Generic file?
+            // TODO: This is oddly specialized compared to the above
+            else if (itemViewModel is { ViewModel: CodeFileViewModel codeFileViewModel})
+            {
+                if (ServiceRegistry.Get<IWindowService>()?.LayoutViewModel is { } layoutViewModel)
+                {
+                    layoutViewModel.DocumentLayout?.OpenDocument(new CodeFileDescriptor()
+                    {
+                        CodeFileViewModel = codeFileViewModel,
+                        PropertyCollection = service.SelectedWorkspace!.PropertyCollection
+                    });
+                }
             }
         }
     }

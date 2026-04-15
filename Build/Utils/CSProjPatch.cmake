@@ -28,9 +28,40 @@
 #   See https://gitlab.kitware.com/cmake/cmake/-/issues/23513
 
 # Expected path
-set(CSProjPath "${CMAKE_ARGV3}/GPU-Reshape.sln")
+set(SolutionRoot "${CMAKE_ARGV3}")
+
+if (EXISTS "${SolutionRoot}/GPU-Reshape.sln")
+	set(CSProjPath "${SolutionRoot}/GPU-Reshape.sln")
+elseif(EXISTS "${SolutionRoot}/GPU-Reshape.slnx")
+	set(CSProjPath "${SolutionRoot}/GPU-Reshape.slnx")
+else()
+	message(FATAL_ERROR "Could not locate GPU-Reshape.sln or GPU-Reshape.slnx in '${SolutionRoot}'")
+endif()
 
 # Replace all instances of "Any CPU" with "x64"
-file(READ ${CSProjPath} SolutionContents)
+file(READ "${CSProjPath}" SolutionContents)
 string(REPLACE "Any CPU" "x64" FILE_CONTENTS "${SolutionContents}")
-file(WRITE ${CSProjPath} ${FILE_CONTENTS})
+file(WRITE "${CSProjPath}" "${FILE_CONTENTS}")
+
+# Prevent the generated ALL_BUILD target from racing external C# projects.
+# These projects are built explicitly and sequentially by BuildUIX.bat.
+set(AllBuildPath "${SolutionRoot}/ALL_BUILD.vcxproj")
+if (EXISTS "${AllBuildPath}")
+	file(STRINGS "${AllBuildPath}" AllBuildLines)
+	set(PatchedAllBuildContents "")
+	set(SkipProjectReference OFF)
+
+	foreach(Line IN LISTS AllBuildLines)
+		if (SkipProjectReference)
+			if (Line MATCHES "^[ \t]*</ProjectReference>")
+				set(SkipProjectReference OFF)
+			endif()
+		elseif(Line MATCHES "^[ \t]*<ProjectReference Include=\"[^\"]+\\.csproj\">")
+			set(SkipProjectReference ON)
+		else()
+			string(APPEND PatchedAllBuildContents "${Line}\r\n")
+		endif()
+	endforeach()
+
+	file(WRITE "${AllBuildPath}" "${PatchedAllBuildContents}")
+endif()

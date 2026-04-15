@@ -36,6 +36,7 @@
              xmlns:documents="clr-namespace:Studio.ViewModels.Documents"
              xmlns:shader="clr-namespace:Studio.ViewModels.Shader"
              xmlns:controls="clr-namespace:Studio.Views.Controls"
+             xmlns:rcontrols="clr-namespace:Studio.Views.Controls;assembly=UIX.Studio.Runtime"
              xmlns:valueConverters="clr-namespace:Studio.ValueConverters"
              mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
              x:Class="Studio.Views.Shader.ILShaderContentView"
@@ -50,7 +51,7 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>
             <RowDefinition Height="{Binding DetailViewModel, ConverterParameter=5, Converter={StaticResource GridVisibilityConverter}}"/>
-            <RowDefinition Height="{Binding DetailViewModel, ConverterParameter=150, Converter={StaticResource GridVisibilityConverter}}"/>
+            <RowDefinition Height="{Binding DetailViewModel, ConverterParameter=250, Converter={StaticResource GridVisibilityConverter}}"/>
         </Grid.RowDefinitions>
 
         <avaloniaEdit:TextEditor
@@ -58,6 +59,7 @@
             FontFamily="Consolas,Menlo,Monospace"
             Foreground="#D4D4D4"
             Background="{StaticResource TextBlockColor}"
+            ContextMenu="{StaticResource ReactiveContextMenu}"
             HorizontalScrollBarVisibility="Auto"
             VerticalScrollBarVisibility="Visible"
             FontWeight="Light"
@@ -68,7 +70,7 @@
             IsReadOnly="True"
             Text="..." />
         
-        <controls:ValidationMarkerCanvas 
+        <controls:SourceObjectMarkerCanvas 
             Grid.Row="0"
             x:Name="MarkerCanvas"
             Margin="0 0 20 20"
@@ -81,7 +83,7 @@
             ResizeDirection="Rows"/>
         
         <Grid Grid.Row="2" x:Name="DetailGrid">
-            <controls:LocatorViewHost 
+            <rcontrols:LocatorViewHost 
                 x:Name="DetailViewHost" 
                 HorizontalAlignment="Stretch" 
                 DataContext="{Binding DetailViewModel}"/>
