@@ -48,6 +48,9 @@ if errorlevel 1 (
 
 echo Building UIX .NET projects for %BUILD_CONFIG%^|x64...
 
+call :BuildCMakeTargets
+if errorlevel 1 exit /b 1
+
 call :BuildProject "Source\UIX\Runtime\Runtime.csproj"
 if errorlevel 1 exit /b 1
 
@@ -77,6 +80,26 @@ if errorlevel 1 exit /b 1
 
 echo UIX .NET build completed.
 exit /b 0
+
+:BuildCMakeTargets
+echo   - CMake-managed .NET dependencies
+cmake --build "%BUILD_DIR%" --config %BUILD_CONFIG% --target ^
+    GRS.Libraries.Message.DotNet ^
+    GRS.Libraries.Bridge.DotNet ^
+    GRS.Services.HostResolver.DotNet ^
+    GRS.Services.Discovery.DotNet ^
+    GRS.Libraries.Bridge.Schema.DotNet ^
+    GRS.Libraries.Backend.Schema.DotNet ^
+    GRS.Features.Concurrency.Backend.DotNet ^
+    GRS.Features.Debug.Backend.DotNet ^
+    GRS.Features.Descriptor.Backend.DotNet ^
+    GRS.Features.DeviceCommands.Backend.DotNet ^
+    GRS.Features.ExportStability.Backend.DotNet ^
+    GRS.Features.Initialization.Backend.DotNet ^
+    GRS.Features.Loop.Backend.DotNet ^
+    GRS.Features.ResourceBounds.Backend.DotNet ^
+    GRS.Features.Waterfall.Backend.DotNet
+exit /b %ERRORLEVEL%
 
 :BuildProject
 echo   - %~1

@@ -39,6 +39,10 @@
              x:DataType="controls:ValidationMarkerViewModel"
              HorizontalAlignment="Right"
              VerticalAlignment="Top">
+    <UserControl.Resources>
+        <valueConverters:ValidationSeverityConverter x:Key="ValidationSeverityConverter" />
+    </UserControl.Resources>
+
     <UserControl.DataContext>
         <controls:ValidationMarkerViewModel/>
     </UserControl.DataContext>
@@ -82,7 +86,7 @@
                 <PathIcon
                     Data="{StaticResource ChevronDown}" 
                     Margin="5 1 0 0"
-                    Foreground="{Binding StatusColor}"
+                    Foreground="{Binding SelectedObject, Converter={StaticResource ValidationSeverityConverter}}"
                     Width="11" />
             </StackPanel>
 

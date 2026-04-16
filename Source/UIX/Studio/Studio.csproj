@@ -97,6 +97,11 @@
       </Compile>
       <Compile Remove="ViewModels\Controls\ContextMenuViewModel.cs" />
       <Compile Remove="ViewModels\Controls\MenuItemViewModel.cs" />
+      <Compile Remove="ViewModels\Shader\CodeShaderContentViewModel.cs" />
+      <Compile Remove="App.axaml.cs" />
+      <AvaloniaXaml Remove="App.axaml" />
+      <Compile Remove="Views\Shader\CodeShaderContentView.axaml.cs" />
+      <AvaloniaXaml Remove="Views\Shader\CodeShaderContentView.axaml" />
       <Compile Update="Views\Documents\WorkspaceOverviewView.axaml.cs">
         <DependentUpon>WorkspaceView.axaml</DependentUpon>
         <SubType>Code</SubType>
@@ -265,7 +270,7 @@
         <SubType>Code</SubType>
       </Compile>
       <Compile Update="App\DesktopApp.axaml.cs">
-        <DependentUpon>App.axaml</DependentUpon>
+        <DependentUpon>DesktopApp.axaml</DependentUpon>
         <SubType>Code</SubType>
       </Compile>
       <None Remove="Resources\Render\StaticTemplate.scriban.html" />

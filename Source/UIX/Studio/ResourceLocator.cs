@@ -44,8 +44,9 @@ namespace Studio
         public static T? GetResource<T>(string name, T? defaultValue = default)
         {
             object? value = null;
+            var resourceHost = Application.Current;
             
-            if (!App.DefaultStyle.TryGetResource(name, null, out value) || value == null)
+            if (resourceHost == null || !resourceHost.TryGetResource(name, null, out value) || value == null)
             {
 #if DEBUG
                 Debug.WriteLine($"ResourceLocator - Failed to find resource '{name}'");

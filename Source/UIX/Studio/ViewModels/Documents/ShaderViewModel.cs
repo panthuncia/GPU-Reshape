@@ -173,6 +173,7 @@ namespace Studio.ViewModels.Documents
                 {
                     // Bind properties
                     this.BindProperty(x => x.PropertyCollection, x => shaderContentViewModel.PropertyCollection = x);
+                    this.BindProperty(x => x.Object, x => shaderContentViewModel.Object = x);
                     this.BindProperty(x => x.Object, x => shaderContentViewModel.Content = x);
 
                     // Bind active state change
@@ -270,7 +271,11 @@ namespace Studio.ViewModels.Documents
             });
             
             // Update content objects
-            ShaderContentViewModels.ForEach(x => x.Content = _object);
+            ShaderContentViewModels.ForEach(x =>
+            {
+                x.Object = _object;
+                x.Content = _object;
+            });
         }
 
         /// <summary>

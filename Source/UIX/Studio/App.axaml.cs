@@ -42,7 +42,7 @@ using Studio.Views;
 
 namespace Studio
 {
-    public class App : Application
+    public partial class App : Application
     {
         /// <summary>
         /// Default dark style

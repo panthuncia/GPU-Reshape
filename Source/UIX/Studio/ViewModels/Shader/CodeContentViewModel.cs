@@ -145,6 +145,15 @@ namespace Studio.ViewModels.Shader
         }
 
         /// <summary>
+        /// Underlying object
+        /// </summary>
+        public Workspace.Objects.ShaderViewModel? Object
+        {
+            get => _object;
+            set => this.RaiseAndSetIfChanged(ref _object, value);
+        }
+
+        /// <summary>
         /// Assigned content
         /// </summary>
         public object? Content
@@ -374,6 +383,11 @@ namespace Studio.ViewModels.Shader
         /// Internal active state
         /// </summary>
         private bool _isActive = false;
+
+        /// <summary>
+        /// Underlying object
+        /// </summary>
+        private Workspace.Objects.ShaderViewModel? _object;
         
         /// <summary>
         /// Internal selections tate
