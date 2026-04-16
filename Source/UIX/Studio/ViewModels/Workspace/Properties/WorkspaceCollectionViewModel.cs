@@ -170,6 +170,12 @@ namespace Studio.ViewModels.Workspace.Properties
             {
                 ConnectionViewModel = ConnectionViewModel
             });
+
+            // Register execution stack trace service
+            Services.Add(new ExecutionStackTraceService()
+            {
+                ConnectionViewModel = ConnectionViewModel
+            });
             
             // Register property replication service
             Services.Add(new PropertyReplicationService()

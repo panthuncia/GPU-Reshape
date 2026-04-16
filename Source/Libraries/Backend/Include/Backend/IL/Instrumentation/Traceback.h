@@ -47,6 +47,7 @@ namespace IL {
 
         // Kernel info
         message.traceback.executionFlag = execution.Get<&ExecutionInfo::executionFlags>(emitter);
+        message.traceback.rollingExecutionUID = execution.Get<&ExecutionInfo::rollingExecutionUID>(emitter);
         message.traceback.pipelineUid = execution.Get<&ExecutionInfo::pipelineUID>(emitter);
         message.traceback.queueUid = execution.Get<&ExecutionInfo::queueUID>(emitter);
 

@@ -116,6 +116,16 @@ namespace Studio.ViewModels.Shader
         public ICommand? ShowInIL { get; }
 
         /// <summary>
+        /// All installed services
+        /// </summary>
+        public ObservableCollection<IDestructableObject> Services { get; } = new();
+
+        /// <summary>
+        /// Tooling tip
+        /// </summary>
+        public string? ToolTip => Resources.Resources.ShaderView_Code;
+
+        /// <summary>
         /// Is this model active?
         /// </summary>
         public bool IsActive
@@ -148,6 +158,15 @@ namespace Studio.ViewModels.Shader
                     OnObjectChanged();
                 }
             }
+        }
+
+        /// <summary>
+        /// Underlying content
+        /// </summary>
+        public object? Content
+        {
+            get => Object;
+            set => Object = value as Workspace.Objects.ShaderViewModel;
         }
 
         /// <summary>

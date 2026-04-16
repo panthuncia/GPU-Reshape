@@ -269,8 +269,6 @@ namespace Studio.ViewModels.Documents
                 }
             });
             
-            // Update content objects
-            ShaderContentViewModels.ForEach(x => x.Content = _object);
         }
 
         /// <summary>

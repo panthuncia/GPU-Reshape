@@ -9,7 +9,8 @@ using Studio.Models.Workspace;
 using Studio.ViewModels.Shader;
 using Studio.ViewModels.Workspace.Objects;
 using Studio.ViewModels.Workspace.Properties;
-using Studio.ViewModels.Workspace.Properties.Instrumentation;
+using ShaderPropertyViewModel = Studio.ViewModels.Workspace.Properties.Instrumentation.ShaderPropertyViewModel;
+using WorkspaceShaderViewModel = Studio.ViewModels.Workspace.Objects.ShaderViewModel;
 
 namespace GRS.Features.Debug.UIX.ViewModels.Utils;
 
@@ -44,7 +45,7 @@ public static class WatchpointUtils
     /// <summary>
     /// Add a new watchpoint on a mapped instruction
     /// </summary>
-    public static void AddWatchpointBinding(WatchpointViewModel watchpointViewModel, ShaderViewModel shaderViewModel, WatchpointCollectionViewModel collection, ShaderInstructionAssociationViewModel associationViewModel, WatchpointCaptureMode captureMode)
+    public static void AddWatchpointBinding(WatchpointViewModel watchpointViewModel, WorkspaceShaderViewModel shaderViewModel, WatchpointCollectionViewModel collection, ShaderInstructionAssociationViewModel associationViewModel, WatchpointCaptureMode captureMode)
     {
         // No relevant mappings
         if (associationViewModel.Mappings.Count == 0)
@@ -93,7 +94,7 @@ public static class WatchpointUtils
     /// <summary>
     /// Create a shader collection property
     /// </summary>
-    public static ShaderWatchpointCollectionPropertyViewModel? FindOrCreateShaderCollectionProperty(WatchpointCollectionViewModel collectionViewModel, ShaderViewModel shaderViewModel)
+    public static ShaderWatchpointCollectionPropertyViewModel? FindOrCreateShaderCollectionProperty(WatchpointCollectionViewModel collectionViewModel, WorkspaceShaderViewModel shaderViewModel)
     {
         // TODO[dbg]: Standardize this, and only when watchpoints are added
         

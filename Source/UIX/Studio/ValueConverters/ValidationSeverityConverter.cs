@@ -54,11 +54,11 @@ namespace Studio.ValueConverters
 
             switch (_object.Severity)
             {
-                case ValidationSeverity.Info:
+                case SourceObjectSeverity.Info:
                     return ResourceLocator.GetBrush("InfoMediumLowForeground");
-                case ValidationSeverity.Warning:
+                case SourceObjectSeverity.Warning:
                     return ResourceLocator.GetBrush("WarningDefaultBrush");
-                case ValidationSeverity.Error:
+                case SourceObjectSeverity.Error:
                     return ResourceLocator.GetBrush("ErrorDefaultBrush");
                 default:
                     throw new ArgumentOutOfRangeException();

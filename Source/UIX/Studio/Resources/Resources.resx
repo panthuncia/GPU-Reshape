@@ -200,6 +200,9 @@ Do you consent to this?</value>
     <data name="Launch_Coverage" xml:space="preserve">
         <value>Enables coverage reporting, affects performance, reports each issue exactly once before moving on to the next</value>
     </data>
+    <data name="Launch_ProgramTraceback" xml:space="preserve">
+        <value>Captures the originating program execution traceback for validation messages, including thread indices and host-side dispatch correlation.</value>
+    </data>
     <data name="Status_Active" xml:space="preserve">
         <value>Recently in-use</value>
     </data>

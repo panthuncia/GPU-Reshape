@@ -1626,6 +1626,11 @@ static bool UsesExecutionInfo(CommandListState* state) {
     return state->streamState->pipelineInstrument->featureTable.executionInfo;
 }
 
+static void CaptureAndSetExecutionInfo(DeviceState* device, CommandListState* state, PipelineType type, const ExecutionInfo& info) {
+    device->instrumentationController->CaptureExecutionStack(info);
+    device->exportStreamer->SetExecutionInfo(state->streamState, type, info);
+}
+
 void WINAPI HookID3D12CommandListDrawInstanced(ID3D12CommandList* list, UINT VertexCountPerInstance, UINT InstanceCount, UINT StartVertexLocation, UINT StartInstanceLocation) {
     auto table = GetTable(list);
 
@@ -1641,7 +1646,7 @@ void WINAPI HookID3D12CommandListDrawInstanced(ID3D12CommandList* list, UINT Ver
         info.draw.instanceCount = InstanceCount;
         info.draw.startVertex = StartVertexLocation;
         info.draw.startInstance = StartInstanceLocation;
-        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Graphics, info);
+        CaptureAndSetExecutionInfo(device.state, table.state, PipelineType::Graphics, info);
     }
     
     // Commit all pending graphics
@@ -1667,7 +1672,7 @@ void WINAPI HookID3D12CommandListDrawIndexedInstanced(ID3D12CommandList* list, U
         info.draw.instanceOffset = StartInstanceLocation;
         info.draw.startIndex = StartIndexLocation;
         info.draw.startVertex = BaseVertexLocation;
-        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Graphics, info);
+        CaptureAndSetExecutionInfo(device.state, table.state, PipelineType::Graphics, info);
     }
 
     // Commit all pending graphics
@@ -1690,7 +1695,7 @@ void WINAPI HookID3D12CommandListDispatch(ID3D12CommandList* list, UINT ThreadGr
         info.dispatch.groupCountX = ThreadGroupCountX;
         info.dispatch.groupCountY = ThreadGroupCountY;
         info.dispatch.groupCountZ = ThreadGroupCountZ;
-        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Compute, info);
+        CaptureAndSetExecutionInfo(device.state, table.state, PipelineType::Compute, info);
     }
 
     // Commit all pending compute
@@ -1710,7 +1715,7 @@ void WINAPI HookID3D12CommandListDispatchMesh(ID3D12CommandList* list, UINT Thre
     if (UsesExecutionInfo(table.state)) {
         ExecutionInfo info = GetBaseExecutionInfo(table.state);
         info.executionFlags = ExecutionFlag::TypeDraw;
-        device.state->exportStreamer->SetExecutionInfo(table.state->streamState, PipelineType::Graphics, info);
+        CaptureAndSetExecutionInfo(device.state, table.state, PipelineType::Graphics, info);
     }
 
     // Commit all pending graphics
@@ -1802,6 +1807,8 @@ void WINAPI HookID3D12CommandListExecuteIndirect(ID3D12CommandList* list, ID3D12
                 info.executionFlags |= ExecutionFlag::TypeRaytracing;
                 break;
         }
+
+            device.state->instrumentationController->CaptureExecutionStack(info);
         
         // Set compute info if needed
         if (signatureTable.state->activeTypes & PipelineType::Compute) {

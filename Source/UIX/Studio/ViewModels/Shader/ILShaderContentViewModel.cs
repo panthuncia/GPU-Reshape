@@ -128,6 +128,15 @@ namespace Studio.ViewModels.Shader
         }
 
         /// <summary>
+        /// Underlying shader object
+        /// </summary>
+        public ShaderViewModel? Object
+        {
+            get => Content as ShaderViewModel;
+            set => Content = value;
+        }
+
+        /// <summary>
         /// Assigned content
         /// </summary>
         public object? Content

@@ -50,3 +50,33 @@ add_dependencies(
     UIX.Runtime
     GRS.Services.Discovery.NotifyIcon
 )
+
+# Visual Studio does not reliably build the external UIX .csproj entries as part of
+# the generated solution build, so wire the supported UIX batch pass into ALL.
+add_custom_target(
+    UIX.Build ALL
+    COMMAND "${CMAKE_SOURCE_DIR}/BuildUIX.bat" $<CONFIG> "${CMAKE_BINARY_DIR}"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    USES_TERMINAL
+)
+
+set_target_properties(UIX.Build PROPERTIES FOLDER Source/UIX)
+
+add_dependencies(
+    UIX.Build
+    GRS.Features.Concurrency.Backend.DotNet
+    GRS.Features.Debug.Backend.DotNet
+    GRS.Features.Descriptor.Backend.DotNet
+    GRS.Features.DeviceCommands.Backend.DotNet
+    GRS.Features.ExportStability.Backend.DotNet
+    GRS.Features.Initialization.Backend.DotNet
+    GRS.Features.Loop.Backend.DotNet
+    GRS.Features.ResourceBounds.Backend.DotNet
+    GRS.Features.Waterfall.Backend.DotNet
+    GRS.Libraries.Backend.Schema.DotNet
+    GRS.Libraries.Bridge.DotNet
+    GRS.Libraries.Bridge.Schema.DotNet
+    GRS.Libraries.Message.DotNet
+    GRS.Services.Discovery.DotNet
+    GRS.Services.HostResolver.DotNet
+)

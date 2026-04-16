@@ -243,6 +243,11 @@ namespace Studio.Views.Shader
         /// </summary>
         private void OnShaderAdded(CodeContentViewModel codeViewModel, ShaderViewModel shaderViewModel)
         {
+            if (_shaderDisposables.ContainsKey(shaderViewModel))
+            {
+                return;
+            }
+
             CompositeDisposable disposables = new();
             
             // Bind objects

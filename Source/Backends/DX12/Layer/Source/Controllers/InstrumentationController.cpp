@@ -62,7 +62,87 @@
 #include <Schemas/Diagnostic.h>
 
 // Std
+#include <array>
 #include <sstream>
+
+// Win32
+#include <Windows.h>
+#include <dbghelp.h>
+
+namespace {
+static constexpr USHORT kExecutionStackFrameCount = 32;
+static constexpr ULONG kExecutionStackFrameSkip = 2;
+static constexpr size_t kMaxPendingExecutionStacks = 4096;
+
+std::string CaptureExecutionStackTraceString() {
+    static std::mutex symbolMutex;
+    std::lock_guard guard(symbolMutex);
+
+    HANDLE process = GetCurrentProcess();
+    void* frames[kExecutionStackFrameCount]{};
+    USHORT captured = CaptureStackBackTrace(kExecutionStackFrameSkip, kExecutionStackFrameCount, frames, nullptr);
+    if (!captured) {
+        return "<host stack unavailable: CaptureStackBackTrace returned no frames>";
+    }
+
+    SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+
+    static bool attemptedSymbolInitialization = false;
+    static bool symbolsInitialized = false;
+    static DWORD symbolInitializationError = ERROR_SUCCESS;
+    if (!attemptedSymbolInitialization) {
+        attemptedSymbolInitialization = true;
+        symbolsInitialized = SymInitialize(process, nullptr, TRUE) == TRUE;
+        if (!symbolsInitialized) {
+            symbolInitializationError = GetLastError();
+        }
+    }
+
+    std::ostringstream stream;
+    if (!symbolsInitialized) {
+        stream << "<host stack symbol resolution unavailable: SymInitialize failed with error " << symbolInitializationError << ">\n";
+    }
+
+    for (USHORT i = 0; i < captured; ++i) {
+        DWORD64 address = reinterpret_cast<DWORD64>(frames[i]);
+        DWORD64 symbolDisplacement = 0;
+
+        char symbolStorage[sizeof(SYMBOL_INFO) + MAX_SYM_NAME]{};
+        auto* symbol = reinterpret_cast<SYMBOL_INFO*>(symbolStorage);
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = MAX_SYM_NAME;
+
+        stream << "#" << i << " ";
+        if (symbolsInitialized && SymFromAddr(process, address, &symbolDisplacement, symbol)) {
+            stream << symbol->Name;
+        } else {
+            stream << "0x" << std::hex << address << std::dec;
+        }
+
+        IMAGEHLP_LINE64 lineInfo{};
+        lineInfo.SizeOfStruct = sizeof(IMAGEHLP_LINE64);
+
+        DWORD lineDisplacement = 0;
+        if (symbolsInitialized && SymGetLineFromAddr64(process, address, &lineDisplacement, &lineInfo)) {
+            stream << " (" << lineInfo.FileName << ":" << lineInfo.LineNumber << ")";
+        } else if (symbolsInitialized) {
+            HMODULE module = reinterpret_cast<HMODULE>(SymGetModuleBase64(process, address));
+            if (module) {
+                char modulePath[MAX_PATH]{};
+                if (GetModuleFileNameA(module, modulePath, MAX_PATH)) {
+                    stream << " (" << modulePath << ")";
+                }
+            }
+        }
+
+        if (i + 1 != captured) {
+            stream << "\n";
+        }
+    }
+
+    return stream.str();
+}
+}
 
 InstrumentationController::InstrumentationController(DeviceState *device) :
     device(device),
@@ -795,11 +875,59 @@ void InstrumentationController::CommitFeatureMessages() {
     // Always commit the sguid host before,
     // since this may be collected during instrumentation
     device->sguidHost->Commit(device->bridge.GetUnsafe());
+
+    // Emit execution stacks before runtime feature messages so UI lookups are ready immediately
+    CommitExecutionStackMessages();
     
     // Commit all feature messages
     for (const ComRef<IFeature>& feature : device->features) {
         feature->CollectMessages(device->bridge->GetOutput());
     }
+}
+
+void InstrumentationController::CaptureExecutionStack(const ExecutionInfo& info) {
+    if (!info.rollingExecutionUID) {
+        return;
+    }
+
+    std::string stackTrace = CaptureExecutionStackTraceString();
+    if (stackTrace.empty()) {
+        return;
+    }
+
+    std::lock_guard guard(mutex);
+    pendingExecutionStacks.push_back(PendingExecutionStackEntry {
+        .rollingExecutionUID = info.rollingExecutionUID,
+        .stackTrace = std::move(stackTrace)
+    });
+
+    if (pendingExecutionStacks.size() > kMaxPendingExecutionStacks) {
+        pendingExecutionStacks.pop_front();
+    }
+}
+
+void InstrumentationController::CommitExecutionStackMessages() {
+    std::deque<PendingExecutionStackEntry> pending;
+    {
+        std::lock_guard guard(mutex);
+        if (pendingExecutionStacks.empty()) {
+            return;
+        }
+
+        pending.swap(pendingExecutionStacks);
+    }
+
+    MessageStream stream;
+    MessageStreamView view(stream);
+    for (const PendingExecutionStackEntry& entry : pending) {
+        auto* message = view.Add<ExecutionStackTraceMessage>(ExecutionStackTraceMessage::AllocationInfo {
+            .stackTraceLength = static_cast<size_t>(entry.stackTrace.length())
+        });
+        message->rollingExecutionUID = entry.rollingExecutionUID;
+        message->stackTrace.Set(entry.stackTrace.c_str());
+    }
+
+    device->bridge->GetOutput()->AddStreamAndSwap(stream);
 }
 
 void InstrumentationController::Commit() {

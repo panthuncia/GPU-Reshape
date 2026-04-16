@@ -82,7 +82,7 @@
                 <PathIcon
                     Data="{StaticResource ChevronDown}" 
                     Margin="5 1 0 0"
-                    Foreground="{Binding StatusColor}"
+                    Foreground="{Binding SelectedObject, Converter={StaticResource ValidationSeverityConverter}}"
                     Width="11" />
             </StackPanel>
 

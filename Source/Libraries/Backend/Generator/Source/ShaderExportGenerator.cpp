@@ -51,6 +51,7 @@ bool ShaderExportGenerator::Generate(Schema &schema, Language language, SchemaSt
             Chunk &chunk = message.chunks.emplace_back();
             chunk.name = "Traceback";
             chunk.fields.emplace_back(Field { .name = "executionFlag", .type = "uint32" });
+            chunk.fields.emplace_back(Field { .name = "rollingExecutionUID", .type = "uint32" });
             chunk.fields.emplace_back(Field { .name = "pipelineUid", .type = "uint32" });
             chunk.fields.emplace_back(Field { .name = "markerHashes32", .type = "array", .attributes = { { { "element", "uint32" }, { "length", std::to_string(kMaxExecutionInfoMarkerCount) } } } });
             chunk.fields.emplace_back(Field { .name = "queueUid", .type = "uint32" });

@@ -36,6 +36,9 @@
 #include <Backends/DX12/Compiler/Diagnostic/PipelineCompilerDiagnostic.h>
 #include <Backends/DX12/Compiler/Diagnostic/DiagnosticType.h>
 
+// Backend
+#include <Backend/IL/Execution/ExecutionInfo.h>
+
 // Message
 #include <Message/MessageStream.h>
 
@@ -49,6 +52,7 @@
 #include <Bridge/IBridgeListener.h>
 
 // Std
+#include <deque>
 #include <vector>
 #include <chrono>
 #include <set>
@@ -88,6 +92,9 @@ public:
     /// Commit all bridges
     void Commit();
 
+    /// Capture the host execution stack for a tracked execution
+    void CaptureExecutionStack(const ExecutionInfo& info);
+
     /// Wait for all outstanding jobs
     void WaitForCompletion();
 
@@ -119,6 +126,7 @@ protected:
     void CommitShaders(DispatcherBucket* bucket, void *data);
     void CommitPipelines(DispatcherBucket* bucket, void *data);
     void CommitTable(DispatcherBucket* bucket, void *data);
+    void CommitExecutionStackMessages();
     void CommitFeatureMessages();
 
     /// Message handler
@@ -193,6 +201,14 @@ private:
 private:
     /// Virtual redirects, exists for a single session
     std::vector<uint32_t> virtualFeatureRedirects;
+
+    struct PendingExecutionStackEntry {
+        uint32_t rollingExecutionUID{0};
+        std::string stackTrace;
+    };
+
+    /// Execution stack traces waiting to be committed to the bridge
+    std::deque<PendingExecutionStackEntry> pendingExecutionStacks;
 
 private:
     struct Batch {

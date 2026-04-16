@@ -235,6 +235,20 @@ namespace Studio.ViewModels
         }
 
         /// <summary>
+        /// Should the configuration capture program traceback information?
+        /// </summary>
+        [DataMember]
+        public bool ProgramTraceback
+        {
+            get => _programTraceback;
+            set
+            {
+                this.RaiseAndSetIfChanged(ref _programTraceback, value);
+                OnProgramTracebackChanged();
+            }
+        }
+
+        /// <summary>
         /// Should the configuration synchronously record?
         /// </summary>
         [DataMember]
@@ -505,6 +519,7 @@ namespace Studio.ViewModels
             OnDetailChanged();
             OnSafeGuardChanged();
             OnCoverageChanged();
+            OnProgramTracebackChanged();
             OnSynchronousRecordingChanged();
 
             // Get new description
@@ -575,6 +590,17 @@ namespace Studio.ViewModels
             if ((WorkspaceViewModel.PropertyCollection as IInstrumentableObject)?.GetOrCreateInstrumentationProperty()?.GetProperty<InstrumentationConfigViewModel>() is {} config)
             {
                 config.Coverage = Coverage;
+            }
+        }
+
+        /// <summary>
+        /// Invoked on program traceback changes
+        /// </summary>
+        private void OnProgramTracebackChanged()
+        {
+            if ((WorkspaceViewModel.PropertyCollection as IInstrumentableObject)?.GetOrCreateInstrumentationProperty()?.GetProperty<InstrumentationConfigViewModel>() is {} config)
+            {
+                config.ProgramTraceback = ProgramTraceback;
             }
         }
 
@@ -1062,6 +1088,11 @@ namespace Studio.ViewModels
         /// Internal coverage state
         /// </summary>
         private bool _coverage;
+
+        /// <summary>
+        /// Internal program traceback state
+        /// </summary>
+        private bool _programTraceback;
 
         /// <summary>
         /// Internal detail state

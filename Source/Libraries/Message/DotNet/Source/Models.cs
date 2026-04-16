@@ -58,6 +58,11 @@ namespace Message.CLR
         /// Combined execution flags of the program
         /// </summary>
         public ExecutionFlag executionFlag { get; set; }
+
+        /// <summary>
+        /// Rolling execution identifier used to correlate host-side execution state
+        /// </summary>
+        public uint rollingExecutionUID { get; set; }
     
         /// <summary>
         /// Launching pipeline

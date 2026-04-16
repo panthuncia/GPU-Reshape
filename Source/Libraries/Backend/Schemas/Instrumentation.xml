@@ -44,6 +44,11 @@
         <field name="traceback" type="bool"/>
     </message>
 
+    <message name="ExecutionStackTrace">
+        <field name="rollingExecutionUID" type="uint32"/>
+        <field name="stackTrace" type="string"/>
+    </message>
+
     <message name="InstrumentationVersion">
         <field name="version" type="uint64">
             Opaque instrumentation version that may be pushed to the controller, eventually pushed back

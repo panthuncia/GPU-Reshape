@@ -195,6 +195,15 @@ namespace Studio.Resources {
                 return ResourceManager.GetString("Launch_Coverage", resourceCulture);
             }
         }
+
+        /// <summary>
+        ///   Looks up a localized string similar to Captures the originating program execution traceback for validation messages, including thread indices and host-side dispatch correlation..
+        /// </summary>
+        public static string Launch_ProgramTraceback {
+            get {
+                return ResourceManager.GetString("Launch_ProgramTraceback", resourceCulture);
+            }
+        }
         
         /// <summary>
         ///   Looks up a localized string similar to Enables detailed validation reporting, affects performance..

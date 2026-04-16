@@ -45,7 +45,7 @@ namespace Studio
         {
             object? value = null;
             
-            if (!App.DefaultStyle.TryGetResource(name, null, out value) || value == null)
+            if (!global::Studio.App.DesktopApp.DefaultStyle.TryGetResource(name, null, out value) || value == null)
             {
 #if DEBUG
                 Debug.WriteLine($"ResourceLocator - Failed to find resource '{name}'");

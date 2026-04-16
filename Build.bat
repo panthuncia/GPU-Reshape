@@ -76,12 +76,6 @@ if errorlevel 1 (
     exit /b %ERRORLEVEL%
 )
 
-call "%~dp0BuildUIX.bat" Debug "!BUILD_DIR!"
-if errorlevel 1 (
-    echo Failed!
-    exit /b %ERRORLEVEL%
-)
-
 echo:
 echo Full Debug x64 build completed.
 endlocal
