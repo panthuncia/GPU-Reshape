@@ -35,5 +35,5 @@ ExternalProject_Add(
     UPDATE_DISCONNECTED ${ThirdPartyDisconnected}
     CONFIGURE_COMMAND ""
     BUILD_COMMAND ""
-    INSTALL_COMMAND COMMAND ${CMAKE_SOURCE_DIR}/Build/Utils/Copy "${CMAKE_CURRENT_SOURCE_DIR}/BTree" "${CMAKE_BINARY_DIR}/External/include/btree" /s /d
+    INSTALL_COMMAND COMMAND ${PROJECT_SOURCE_DIR}/Build/Utils/Copy "${CMAKE_CURRENT_SOURCE_DIR}/BTree" "${CMAKE_BINARY_DIR}/External/include/btree" /s /d
 )

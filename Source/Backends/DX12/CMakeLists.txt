@@ -106,7 +106,7 @@ set(FeatureProxiesTemplate             ${CMAKE_CURRENT_SOURCE_DIR}/Generator/Tem
 # Resource Paths
 set(HooksSpec    ${CMAKE_CURRENT_SOURCE_DIR}/Layer/Resources/Hooks.json)
 set(DeepCopySpec ${CMAKE_CURRENT_SOURCE_DIR}/Layer/Resources/DeepCopy.json)
-set(DXILRST      ${CMAKE_SOURCE_DIR}/ThirdParty/DXIL/DXIL.rst)
+set(DXILRST      ${PROJECT_SOURCE_DIR}/ThirdParty/DXIL/DXIL.rst)
 
 # Generate the DXIL tables
 add_custom_command(

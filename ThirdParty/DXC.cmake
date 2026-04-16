@@ -28,9 +28,9 @@
 function(Project_AddHLSL OUT_GENERATED PROFILE ARGS HLSL HEADER VAR)
     # Compiler path
     if (WIN32)
-        set(CompilerPath ${CMAKE_SOURCE_DIR}/ThirdParty/DXC/bin/Win64/dxc.exe)
+        set(CompilerPath ${PROJECT_SOURCE_DIR}/ThirdParty/DXC/bin/Win64/dxc.exe)
     else()
-        set(CompilerPath ${CMAKE_SOURCE_DIR}/ThirdParty/DXC/bin/Linux/dxc)
+        set(CompilerPath ${PROJECT_SOURCE_DIR}/ThirdParty/DXC/bin/Linux/dxc)
     endif()
 
     # Hlsl path

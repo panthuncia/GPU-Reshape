@@ -61,11 +61,11 @@ if (NOT "${Checksum}" STREQUAL ${AgilitySDKSHA256})
     if ("${CMAKE_BUILD_TYPE}" STREQUAL "")
         foreach(Config ${CMAKE_CONFIGURATION_TYPES})
             file(MAKE_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${Config}/Dependencies)
-            ConfigureOutputDirectory(${CMAKE_SOURCE_DIR}/ThirdParty/AgilitySDK/build/native/bin/x64 ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${Config}/Dependencies/D3D12)
+            ConfigureOutputDirectory(${PROJECT_SOURCE_DIR}/ThirdParty/AgilitySDK/build/native/bin/x64 ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/${Config}/Dependencies/D3D12)
         endforeach()
     else()
         file(MAKE_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Dependencies)
-        ConfigureOutputDirectory(${CMAKE_SOURCE_DIR}/ThirdParty/AgilitySDK/build/native/bin/x64 ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Dependencies/D3D12)
+        ConfigureOutputDirectory(${PROJECT_SOURCE_DIR}/ThirdParty/AgilitySDK/build/native/bin/x64 ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Dependencies/D3D12)
     endif()
 
     # Get all includes

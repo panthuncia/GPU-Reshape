@@ -37,7 +37,7 @@ add_executable(
 if (WIN32)
     add_custom_command(
         TARGET GRS.Services.HostResolver.Standalone
-        PRE_BUILD COMMAND ${CMAKE_SOURCE_DIR}/Build/Utils/KillHostResolverService.bat
+        PRE_BUILD COMMAND ${PROJECT_SOURCE_DIR}/Build/Utils/KillHostResolverService.bat
     )
 endif()
 

@@ -29,6 +29,11 @@ cmake_minimum_required(VERSION 3.24)
 
 project(GPU-Reshape)
 
+set(GPU_RESHAPE_EXTERNAL_PROJECT_CMAKE_ARGS
+    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+    -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
+)
+
 # Policies
 cmake_policy(SET CMP0135 NEW)
 
