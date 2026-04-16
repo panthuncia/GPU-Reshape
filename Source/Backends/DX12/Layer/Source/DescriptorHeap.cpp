@@ -40,6 +40,16 @@
 // Common
 #include <Common/Format.h>
 
+static uint32_t GetMaxViewDescriptorHeapSize(ID3D12Device* device) {
+    uint32_t driverLimit = 1'000'000;
+
+    if (D3D12_FEATURE_DATA_D3D12_OPTIONS19 options; SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options, sizeof(options))) && options.MaxViewDescriptorHeapSize) {
+        driverLimit = options.MaxViewDescriptorHeapSize;
+    }
+
+    return driverLimit;
+}
+
 HRESULT WINAPI HookID3D12DeviceCreateDescriptorHeap(ID3D12Device *device, const D3D12_DESCRIPTOR_HEAP_DESC *desc, REFIID riid, void **pHeap) {
     auto table = GetTable(device);
 
@@ -65,6 +75,8 @@ HRESULT WINAPI HookID3D12DeviceCreateDescriptorHeap(ID3D12Device *device, const 
     // Heap of interest?
     // If this is not shader visible, there is no need to inject the instrumentation region
     if (shaderVisible && desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
+        const uint32_t driverLimit = GetMaxViewDescriptorHeapSize(device);
+
         // Get desired bound
         uint32_t requestedBound = ShaderExportFixedTwoSidedDescriptorAllocator::GetDescriptorBound(table.state->exportHost.GetUnsafe());
 
@@ -73,6 +85,16 @@ HRESULT WINAPI HookID3D12DeviceCreateDescriptorHeap(ID3D12Device *device, const 
 
         // There is little to no insight for the internal driver limits, so, attempt various sizes
         for (uint32_t divisor = 0; divisor < 4; divisor++) {
+            if (instrumentationBound == 0) {
+                break;
+            }
+
+            // Skip speculative sizes that are guaranteed to violate the device heap limit.
+            if (desc->NumDescriptors > driverLimit - instrumentationBound) {
+                instrumentationBound /= 2;
+                continue;
+            }
+
             // Copy description
             D3D12_DESCRIPTOR_HEAP_DESC expandedHeap = *desc;
             expandedHeap.NumDescriptors += instrumentationBound;
@@ -95,7 +117,7 @@ HRESULT WINAPI HookID3D12DeviceCreateDescriptorHeap(ID3D12Device *device, const 
         if (!heap) {
             // Copy description and allocate the max number of guaranteed descriptors
             D3D12_DESCRIPTOR_HEAP_DESC expandedHeap = *desc;
-            expandedHeap.NumDescriptors = 1'000'000;
+            expandedHeap.NumDescriptors = driverLimit;
 
             // Pass down callchain
             HRESULT hr = table.next->CreateDescriptorHeap(&expandedHeap, __uuidof(ID3D12DescriptorHeap), reinterpret_cast<void**>(&heap));
@@ -369,12 +391,7 @@ static void ValidateHighReserved(DeviceState* state, const DescriptorHeapState* 
     uint32_t idealBound = ShaderExportFixedTwoSidedDescriptorAllocator::GetDescriptorBound(state->exportHost.GetUnsafe());
 
     // Assume a TIER1 limit
-    uint32_t driverLimit = 1'000'000;
-
-    // Query device options 19, if possible
-    if (D3D12_FEATURE_DATA_D3D12_OPTIONS19 options; SUCCEEDED(state->object->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options, sizeof(options)))) {
-        driverLimit = options.MaxViewDescriptorHeapSize;
-    }
+    uint32_t driverLimit = GetMaxViewDescriptorHeapSize(state->object);
 
     // Display friendly message
     Backend::DiagnosticFatal(

@@ -228,6 +228,8 @@
         "ExecuteIndirect",
         "CopyTiles",
         "DispatchMesh",
+        "SetProgram",
+        "DispatchGraph",
         "DispatchRays",
         "SetMarker",
         "BeginEvent",

@@ -33,6 +33,7 @@
 #include <Backends/DX12/States/DeviceState.h>
 #include <Backends/DX12/States/CommandSignatureState.h>
 #include <Backends/DX12/States/PipelineState.h>
+#include <Backends/DX12/States/StateObjectState.h>
 #include <Backends/DX12/States/DescriptorHeapState.h>
 #include <Backends/DX12/Command/UserCommandBuffer.h>
 #include <Backends/DX12/Controllers/InstrumentationController.h>
@@ -57,6 +58,9 @@
 
 // WinPixEventRuntime
 #include <WinPixEventRuntime/pix3.h>
+
+// Std
+#include <cstring>
 
 static D3D12_COMMAND_LIST_TYPE GetEmulatedCommandListType(D3D12_COMMAND_LIST_TYPE type) {
     switch (type) {
@@ -411,6 +415,11 @@ HRESULT WINAPI HookID3D12CommandQueueWait(ID3D12CommandQueue* queue, ID3D12Fence
 
     // Flush any pending work
     FlushCommandQueueContext(GetState(table.state->parent), table.state);
+
+    // Waiting for fence value 0 is always immediately satisfied and only trips the debug layer.
+    if (Value == 0) {
+        return S_OK;
+    }
 
     // Pass down callchain
     return table.bottom->next_Wait(table.next, UnwrapObject(pFence), Value);
@@ -1303,6 +1312,91 @@ void ReconstructPipelineState(DeviceState *device, ID3D12GraphicsCommandList *co
     }
 }
 
+static bool RebindPassThroughStateObjectComputeRootSignature(ID3D12GraphicsCommandList10DetourVTable* bottom, ID3D12GraphicsCommandList10* next, CommandListState* state, bool useNativeRootSignature) {
+    ShaderExportStreamState* streamState = state->streamState;
+    const PipelineState* pipeline = streamState->pipeline;
+    if (!pipeline || pipeline->type != PipelineType::StateObject || pipeline->supportsInstrumentation) {
+        return false;
+    }
+
+    ShaderExportStreamBindState& bindState = streamState->bindStates[static_cast<uint32_t>(PipelineType::ComputeSlot)];
+    const RootSignatureState* rootSignatureState = bindState.rootSignature;
+    if (!rootSignatureState) {
+        return false;
+    }
+
+    ID3D12RootSignature* targetRootSignature = useNativeRootSignature && rootSignatureState->nativeObject
+        ? rootSignatureState->nativeObject
+        : rootSignatureState->object;
+    if (!targetRootSignature) {
+        return false;
+    }
+
+    bottom->next_SetComputeRootSignature(next, targetRootSignature);
+
+    for (uint32_t i = 0; i < rootSignatureState->logicalMapping.userRootCount; i++) {
+        const ShaderExportRootParameterValue& value = bindState.persistentRootParameters[i];
+        const D3D12_DESCRIPTOR_HEAP_TYPE heapType = rootSignatureState->logicalMapping.userRootMappings[i].heapType;
+
+        switch (value.type) {
+            case ShaderExportRootParameterValueType::None: {
+                break;
+            }
+            case ShaderExportRootParameterValueType::Descriptor: {
+                ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV || heapType == D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, "Unexpected heap type");
+                bottom->next_SetComputeRootDescriptorTable(next, i, value.payload.descriptor);
+                break;
+            }
+            case ShaderExportRootParameterValueType::SRV: {
+                ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, "Unexpected heap type");
+                bottom->next_SetComputeRootShaderResourceView(next, i, value.payload.virtualAddress);
+                break;
+            }
+            case ShaderExportRootParameterValueType::UAV: {
+                ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, "Unexpected heap type");
+                bottom->next_SetComputeRootUnorderedAccessView(next, i, value.payload.virtualAddress);
+                break;
+            }
+            case ShaderExportRootParameterValueType::CBV: {
+                ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, "Unexpected heap type");
+                bottom->next_SetComputeRootConstantBufferView(next, i, value.payload.virtualAddress);
+                break;
+            }
+            case ShaderExportRootParameterValueType::Constant: {
+                ASSERT(heapType == D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES, "Unexpected heap type");
+                bottom->next_SetComputeRoot32BitConstants(
+                    next,
+                    i,
+                    value.payload.constant.dataByteCount / sizeof(uint32_t),
+                    value.payload.constant.data,
+                    0
+                );
+                break;
+            }
+        }
+    }
+
+    return true;
+}
+
+static StateObjectState* FindPassThroughWorkGraphState(DeviceState* device, const D3D12_PROGRAM_IDENTIFIER& programIdentifier) {
+    auto linear = device->states_Pipelines.GetLinear();
+    for (PipelineState* pipelineState : linear) {
+        if (!pipelineState || pipelineState->type != PipelineType::StateObject || pipelineState->supportsInstrumentation) {
+            continue;
+        }
+
+        auto* stateObjectState = static_cast<StateObjectState*>(pipelineState);
+        for (const D3D12_PROGRAM_IDENTIFIER& candidate : stateObjectState->workGraphProgramIdentifiers) {
+            if (std::memcmp(&candidate, &programIdentifier, sizeof(D3D12_PROGRAM_IDENTIFIER)) == 0) {
+                return stateObjectState;
+            }
+        }
+    }
+
+    return nullptr;
+}
+
 void ReconstructRenderPassState(DeviceState *device, ID3D12GraphicsCommandList *commandList, ShaderExportStreamState* streamState) {
     BeginRenderPassForReconstruction(static_cast<ID3D12GraphicsCommandList4*>(commandList), &streamState->renderPass);
 }
@@ -1723,6 +1817,39 @@ void WINAPI HookID3D12CommandListDispatchMesh(ID3D12CommandList* list, UINT Thre
 
     // Pass down callchain
     table.next->DispatchMesh(ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ);
+}
+
+void WINAPI HookID3D12CommandListSetProgram(ID3D12CommandList* list, const D3D12_SET_PROGRAM_DESC* pDesc) {
+    auto table = GetTable(list);
+	auto device = GetTable(table.state->parent);
+
+    // Pass down callchain
+    table.bottom->next_SetProgram(table.next, pDesc);
+
+    if (!pDesc || pDesc->Type != D3D12_PROGRAM_TYPE_WORK_GRAPH) {
+        return;
+    }
+
+    StateObjectState* workGraphState = FindPassThroughWorkGraphState(device.state, pDesc->WorkGraph.ProgramIdentifier);
+    if (!workGraphState) {
+        return;
+    }
+
+    workGraphState->lastUsedTimestampNS.store(device.state->syncPointActionThread.GetLastTimeSinceEpochNS(), std::memory_order::relaxed);
+    device.state->exportStreamer->BindPipeline(table.state->streamState, workGraphState, workGraphState->object, nullptr, table.state->object);
+}
+
+void WINAPI HookID3D12CommandListDispatchGraph(ID3D12CommandList* list, const D3D12_DISPATCH_GRAPH_DESC* pDesc) {
+    auto table = GetTable(list);
+
+    const bool reboundNativeRootSignature = RebindPassThroughStateObjectComputeRootSignature(table.bottom, table.next, table.state, true);
+
+    // Pass down callchain
+    table.bottom->next_DispatchGraph(table.next, pDesc);
+
+    if (reboundNativeRootSignature) {
+        RebindPassThroughStateObjectComputeRootSignature(table.bottom, table.next, table.state, false);
+    }
 }
 
 void WINAPI HookID3D12CommandListSetComputeRoot32BitConstant(ID3D12CommandList *list, UINT RootParameterIndex, UINT SrcData, UINT DestOffsetIn32BitValues) {
@@ -2249,6 +2376,10 @@ void HookID3D12CommandQueueExecuteCommandLists(ID3D12CommandQueue *queue, UINT c
 
     // Wait for all primitives
     for (const SchedulerPrimitiveEvent& primitive : submitContext.waitPrimitives) {
+        if (primitive.value == 0) {
+            continue;
+        }
+
         table.next->Wait(device.state->scheduler->GetPrimitiveFence(primitive.id), primitive.value);
     } 
 

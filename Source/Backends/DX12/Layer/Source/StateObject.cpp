@@ -44,6 +44,9 @@
 // Common
 #include <Common/String.h>
 
+// Std
+#include <cstring>
+
 struct StateObjectInlineAssociationEntry {
     /// Name of this inline export
     LPCWSTR name{nullptr};
@@ -98,6 +101,42 @@ static bool ContainsStateSubObjectType(const D3D12_STATE_OBJECT_DESC* desc, D3D1
     }
 
     return false;
+}
+
+static void AddUniqueWorkGraphProgramIdentifier(StateObjectState* state, const D3D12_PROGRAM_IDENTIFIER& identifier) {
+    for (const D3D12_PROGRAM_IDENTIFIER& existing : state->workGraphProgramIdentifiers) {
+        if (std::memcmp(&existing, &identifier, sizeof(D3D12_PROGRAM_IDENTIFIER)) == 0) {
+            return;
+        }
+    }
+
+    state->workGraphProgramIdentifiers.push_back(identifier);
+}
+
+static void CaptureWorkGraphProgramIdentifiers(StateObjectState* state, ID3D12StateObject* stateObject, const D3D12_STATE_OBJECT_DESC* desc) {
+    if (!stateObject || !desc || !ContainsStateSubObjectType(desc, D3D12_STATE_SUBOBJECT_TYPE_WORK_GRAPH)) {
+        return;
+    }
+
+    ID3D12StateObjectProperties1* stateObjectProperties{nullptr};
+    if (FAILED(stateObject->QueryInterface(__uuidof(ID3D12StateObjectProperties1), reinterpret_cast<void**>(&stateObjectProperties))) || !stateObjectProperties) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < desc->NumSubobjects; i++) {
+        if (desc->pSubobjects[i].Type != D3D12_STATE_SUBOBJECT_TYPE_WORK_GRAPH) {
+            continue;
+        }
+
+        const D3D12_WORK_GRAPH_DESC workGraphDesc = StateSubObjectWriter::Read<D3D12_WORK_GRAPH_DESC>(desc->pSubobjects[i]);
+        if (!workGraphDesc.ProgramName) {
+            continue;
+        }
+
+        AddUniqueWorkGraphProgramIdentifier(state, stateObjectProperties->GetProgramIdentifier(workGraphDesc.ProgramName));
+    }
+
+    stateObjectProperties->Release();
 }
 
 struct NativeStateObjectDesc {
@@ -184,6 +223,31 @@ static const D3D12_STATE_OBJECT_DESC* CreateNativeStateObjectDescForPassThrough(
 
     nativeDesc.desc.pSubobjects = nativeDesc.subObjects.data();
     return &nativeDesc.desc;
+}
+
+static void CapturePassThroughRootSignatureMetadata(StateObjectState* state, const D3D12_STATE_OBJECT_DESC* desc, ID3D12StateObject* existingStateObject) {
+    if (existingStateObject) {
+        auto existingTable = GetTable(existingStateObject);
+        state->signature = existingTable.state->signature;
+    }
+
+    if (!desc) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < desc->NumSubobjects; i++) {
+        const D3D12_STATE_SUBOBJECT& subObject = desc->pSubobjects[i];
+        if (subObject.Type != D3D12_STATE_SUBOBJECT_TYPE_GLOBAL_ROOT_SIGNATURE) {
+            continue;
+        }
+
+        auto rootSignature = StateSubObjectWriter::Read<D3D12_GLOBAL_ROOT_SIGNATURE>(subObject);
+        if (!rootSignature.pGlobalRootSignature) {
+            continue;
+        }
+
+        state->signature = GetTable(rootSignature.pGlobalRootSignature).state;
+    }
 }
 
 static RootSignatureState* GetLocalRootSignatureForIdentifier(StateObjectState* state, LPCWSTR _export) {
@@ -1158,6 +1222,7 @@ static void InheritStateObject(StateObjectState* stateObject, StateObjectState* 
     stateObject->hitGroupSubobjects = source->hitGroupSubobjects;
     stateObject->identifierExports  = source->identifierExports;
     stateObject->subObjectMap       = source->subObjectMap;
+    stateObject->workGraphProgramIdentifiers = source->workGraphProgramIdentifiers;
 
     // Add shader reference counts
     for (ShaderState* shader : stateObject->shaders) {
@@ -1203,6 +1268,7 @@ static HRESULT CreateOrAddToStateObject(ID3D12Device2* device, const D3D12_STATE
 
     if (requiresPassThrough) {
         state->supportsInstrumentation = false;
+        CapturePassThroughRootSignatureMetadata(state, pDesc, existingStateObject);
 
         NativeStateObjectDesc nativeDesc;
         const D3D12_STATE_OBJECT_DESC* nativeObjectDesc = CreateNativeStateObjectDescForPassThrough(nativeDesc, pDesc);
@@ -1223,6 +1289,7 @@ static HRESULT CreateOrAddToStateObject(ID3D12Device2* device, const D3D12_STATE
         }
 
         state->object = stateObject;
+		CaptureWorkGraphProgramIdentifiers(state, stateObject, nativeObjectDesc);
 
         // External users
         device->AddRef();
@@ -1285,6 +1352,7 @@ static HRESULT CreateOrAddToStateObject(ID3D12Device2* device, const D3D12_STATE
 
     // Keep native around
     state->object = stateObject;
+	CaptureWorkGraphProgramIdentifiers(state, stateObject, &desc);
     
     // External users
     device->AddRef();

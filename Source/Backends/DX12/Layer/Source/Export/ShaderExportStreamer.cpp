@@ -735,6 +735,7 @@ static PipelineType DecayPipelineType(PipelineType type) {
 void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const PipelineState *pipeline, IUnknown* pipelineObject, PipelineInstrument* instrument, ID3D12GraphicsCommandList* commandList) {
     // Get bind state from slot
     ShaderExportStreamBindState& bindState = GetBindStateFromPipeline(state, pipeline);
+    const RootSignatureState* pipelineSignature = pipeline->signature;
 
     // Set state
     state->pipeline = pipeline;
@@ -742,11 +743,11 @@ void ShaderExportStreamer::BindPipeline(ShaderExportStreamState *state, const Pi
     state->pipelineInstrument = instrument;
 
     // Invalidated root signature?
-    if (bindState.rootSignature != pipeline->signature) {
+    if (pipelineSignature && bindState.rootSignature != pipelineSignature) {
         state->pipelineSegmentMask &= ~PipelineTypeSet(DecayPipelineType(pipeline->type));
 
         // Invalidate the signature itself if the hash changed
-        if (bindState.rootSignature && bindState.rootSignature->physicalMapping->signatureHash != pipeline->signature->physicalMapping->signatureHash) {
+        if (bindState.rootSignature && bindState.rootSignature->physicalMapping->signatureHash != pipelineSignature->physicalMapping->signatureHash) {
             bindState.rootSignature = nullptr;
         }
     }

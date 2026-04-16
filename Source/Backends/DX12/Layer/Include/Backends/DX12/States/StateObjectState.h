@@ -180,6 +180,9 @@ struct __declspec(uuid("BC966B9B-874D-4707-8BD9-42784FB341CE")) StateObjectState
     /// The state object may inline some states, such as those that come from DXIL libraries
     std::vector<IUnknown*> inlinedSubObjectStates;
 
+    /// Program identifiers for pass-through work-graph programs contained in this state object.
+    std::vector<D3D12_PROGRAM_IDENTIFIER> workGraphProgramIdentifiers;
+
     /// Defacto deep copy for this state object
     StateSubObjectWriter writer;
 };
