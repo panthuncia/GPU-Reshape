@@ -48,8 +48,184 @@
 #include <Backend/Diagnostic/DiagnosticBucketScope.h>
 
 // Common
+#include <Common/CRC.h>
+#include <Common/FileSystem.h>
+#include <Common/Hash.h>
 #include <Common/Dispatcher/Dispatcher.h>
 #include <Common/Registry.h>
+
+// Std
+#include <cstdio>
+#include <fstream>
+
+namespace {
+    constexpr uint64_t kPersistentShaderArtifactMagic = 0x4843534452475047ull;
+    constexpr uint32_t kPersistentShaderArtifactVersion = 1u;
+
+    struct PersistentShaderArtifactKey {
+        uint32_t sourceBytecodeHash{0};
+        uint64_t featureBitSet{0};
+        uint64_t combinedHash{0};
+        uint64_t rootSignatureHash{0};
+        uint64_t bindingHash{0};
+        uint64_t localKeyHash{0};
+    };
+
+    struct PersistentShaderArtifactHeader {
+        uint64_t magic{kPersistentShaderArtifactMagic};
+        uint32_t version{kPersistentShaderArtifactVersion};
+        uint32_t streamByteSize{0};
+        PersistentShaderArtifactKey key{};
+        uint8_t executionInfo{0};
+        uint8_t reserved[7]{};
+    };
+
+    static bool operator==(const PersistentShaderArtifactKey& lhs, const PersistentShaderArtifactKey& rhs) {
+        return lhs.sourceBytecodeHash == rhs.sourceBytecodeHash &&
+               lhs.featureBitSet == rhs.featureBitSet &&
+               lhs.combinedHash == rhs.combinedHash &&
+               lhs.rootSignatureHash == rhs.rootSignatureHash &&
+               lhs.bindingHash == rhs.bindingHash &&
+               lhs.localKeyHash == rhs.localKeyHash;
+    }
+
+    static uint64_t HashRootRegisterBindingInfo(const RootRegisterBindingInfo& bindingInfo) {
+        uint64_t hash = 0;
+
+        CombineHash(hash, bindingInfo.global.space);
+        CombineHash(hash, bindingInfo.global.shaderExportBaseRegister);
+        CombineHash(hash, bindingInfo.global.shaderExportCount);
+        CombineHash(hash, bindingInfo.global.resourcePRMTBaseRegister);
+        CombineHash(hash, bindingInfo.global.samplerPRMTBaseRegister);
+        CombineHash(hash, bindingInfo.global.shaderDataConstantRegister);
+        CombineHash(hash, bindingInfo.global.descriptorConstantBaseRegister);
+        CombineHash(hash, bindingInfo.global.eventConstantBaseRegister);
+        CombineHash(hash, bindingInfo.global.shaderResourceBaseRegister);
+        CombineHash(hash, bindingInfo.global.shaderResourceCount);
+
+        CombineHash(hash, bindingInfo.bindings.space);
+        CombineHash(hash, bindingInfo.bindings.shaderBindingResourceBaseRegister);
+        CombineHash(hash, bindingInfo.bindings.shaderBindingResourceCount);
+
+        CombineHash(hash, bindingInfo.local.space);
+        CombineHash(hash, bindingInfo.local.descriptorConstantBaseRegister);
+
+        return hash;
+    }
+
+    static uint64_t HashLocalInstrumentationKeys(const ShaderInstrumentationKey& instrumentationKey) {
+        uint64_t hash = 0;
+        CombineHash(hash, instrumentationKey.localKeyCount);
+
+        for (uint32_t index = 0; index < instrumentationKey.localKeyCount; ++index) {
+            const ShaderLocalInstrumentationKey& localKey = instrumentationKey.localKeys[index];
+            CombineHash(hash, localKey.mangledName ? StringCRC32Short(localKey.mangledName) : 0u);
+            CombineHash(hash, localKey.localPhysicalMapping ? localKey.localPhysicalMapping->signatureHash : 0ull);
+        }
+
+        return hash;
+    }
+
+    static PersistentShaderArtifactKey BuildPersistentShaderArtifactKey(const ShaderJob& job) {
+        PersistentShaderArtifactKey key{};
+        key.sourceBytecodeHash = BufferCRC32Short(job.state->byteCode.pShaderBytecode, job.state->byteCode.BytecodeLength);
+        key.featureBitSet = job.instrumentationKey.featureBitSet;
+        key.combinedHash = job.instrumentationKey.combinedHash;
+        key.rootSignatureHash = job.instrumentationKey.physicalMapping ? job.instrumentationKey.physicalMapping->signatureHash : 0ull;
+        key.bindingHash = HashRootRegisterBindingInfo(job.instrumentationKey.bindingInfo);
+        key.localKeyHash = HashLocalInstrumentationKeys(job.instrumentationKey);
+        return key;
+    }
+
+    static std::filesystem::path GetPersistentShaderArtifactPath(const PersistentShaderArtifactKey& key) {
+        std::filesystem::path directory = GetIntermediateCachePath() / "DX12" / "ShaderInstrumentation";
+        CreateDirectoryTree(directory);
+
+        char name[192];
+        std::snprintf(
+            name,
+            sizeof(name),
+            "%08X_%016llX_%016llX_%016llX_%016llX_%016llX.bin",
+            key.sourceBytecodeHash,
+            static_cast<unsigned long long>(key.featureBitSet),
+            static_cast<unsigned long long>(key.combinedHash),
+            static_cast<unsigned long long>(key.rootSignatureHash),
+            static_cast<unsigned long long>(key.bindingHash),
+            static_cast<unsigned long long>(key.localKeyHash)
+        );
+
+        return directory / name;
+    }
+
+    static bool TryLoadPersistentShaderArtifact(const ShaderJob& job, ShaderInstrument& shaderInstrument) {
+        const PersistentShaderArtifactKey key = BuildPersistentShaderArtifactKey(job);
+        const std::filesystem::path path = GetPersistentShaderArtifactPath(key);
+
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream) {
+            return false;
+        }
+
+        PersistentShaderArtifactHeader header{};
+        stream.read(reinterpret_cast<char*>(&header), sizeof(header));
+        if (!stream || header.magic != kPersistentShaderArtifactMagic || header.version != kPersistentShaderArtifactVersion || !(header.key == key)) {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            return false;
+        }
+
+        if (header.streamByteSize) {
+            shaderInstrument.stream.Resize(header.streamByteSize);
+            stream.read(reinterpret_cast<char*>(shaderInstrument.stream.GetMutableData()), header.streamByteSize);
+            if (!stream) {
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+                shaderInstrument.stream.Clear();
+                return false;
+            }
+        }
+
+        shaderInstrument.featureTable.executionInfo = header.executionInfo != 0;
+        return true;
+    }
+
+    static void StorePersistentShaderArtifact(const ShaderJob& job, const ShaderInstrument& shaderInstrument) {
+        const PersistentShaderArtifactKey key = BuildPersistentShaderArtifactKey(job);
+        const std::filesystem::path path = GetPersistentShaderArtifactPath(key);
+        const std::filesystem::path tempPath = path.string() + ".tmp";
+
+        PersistentShaderArtifactHeader header{};
+        header.streamByteSize = shaderInstrument.stream.GetByteSize();
+        header.key = key;
+        header.executionInfo = shaderInstrument.featureTable.executionInfo ? 1u : 0u;
+
+        {
+            std::ofstream stream(tempPath, std::ios::binary | std::ios::trunc);
+            if (!stream) {
+                return;
+            }
+
+            stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            if (header.streamByteSize) {
+                stream.write(reinterpret_cast<const char*>(shaderInstrument.stream.GetData()), header.streamByteSize);
+            }
+
+            if (!stream) {
+                std::error_code ec;
+                std::filesystem::remove(tempPath, ec);
+                return;
+            }
+        }
+
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        ec.clear();
+        std::filesystem::rename(tempPath, path, ec);
+        if (ec) {
+            std::filesystem::remove(tempPath, ec);
+        }
+    }
+}
 
 ShaderCompiler::ShaderCompiler(DeviceState *device)
     : device(device),
@@ -186,6 +362,14 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
     // Diagnostic scope
     DiagnosticBucketScope scope(job.diagnostic->messages, job.state->uid);
 
+    // Try to reuse a persisted artifact before touching the source module.
+    ShaderInstrument cachedInstrument(allocators);
+    if (TryLoadPersistentShaderArtifact(job, cachedInstrument)) {
+        job.state->AddInstrument(job.instrumentationKey, new (allocators) ShaderInstrument(std::move(cachedInstrument)));
+        ++job.diagnostic->passedJobs;
+        return true;
+    }
+
     // Initialize module
     if (!InitializeModule(job.state)) {
         scope.Add(DiagnosticType::ShaderUnknownHeader, *static_cast<const uint32_t *>(job.state->byteCode.pShaderBytecode));
@@ -266,6 +450,8 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
         // Add instrumented module
         debug->Add(debugPath, "instrumented", module);
     }
+
+    StorePersistentShaderArtifact(job, shaderInstrument);
 
     // Assign the instrument
     job.state->AddInstrument(job.instrumentationKey, new (allocators) ShaderInstrument(shaderInstrument));
