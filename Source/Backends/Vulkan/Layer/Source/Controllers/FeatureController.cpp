@@ -111,8 +111,10 @@ void FeatureController::OnMessage(const GetFeaturesMessage& message) {
         }
     }
 
-    // Base stream
-    MessageStreamView view(stream);
+    // Publish feature discovery immediately so synchronous host queries can read the reply
+    // from the bridge output without waiting for a later device sync point.
+    MessageStream response;
+    MessageStreamView view(response);
 
     // Allocate message
     auto *discovery = view.Add<FeatureListMessage>(FeatureListMessage::AllocationInfo{
@@ -121,6 +123,8 @@ void FeatureController::OnMessage(const GetFeaturesMessage& message) {
 
     // Set entries
     discovery->descriptors.Set(descriptors);
+
+    bridge->GetOutput()->AddStreamAndSwap(response);
 }
 
 void FeatureController::Commit() {
