@@ -35,6 +35,7 @@
 
 // Std
 #include <cstdint>
+#include <string>
 
 // Forward declarations
 struct DXParseJob;
@@ -95,6 +96,9 @@ public:
     /// Get the language
     /// \return given language
     virtual const char* GetLanguage() = 0;
+
+    /// Get the best-effort entry point name for this module.
+    virtual std::string GetEntryPointName() = 0;
 
     /// Is this module optimized?
     virtual bool IsOptimized() = 0;

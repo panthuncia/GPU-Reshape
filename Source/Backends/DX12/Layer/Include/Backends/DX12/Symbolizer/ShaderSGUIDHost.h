@@ -54,6 +54,15 @@ public:
     /// \param bridge
     void Commit(IBridge* bridge);
 
+    /// Copy all known mappings for a shader guid.
+    /// Used by persistent shader artifacts to serialize the SGUID host state that
+    /// was baked into the instrumented shader blob.
+    void CopyMappings(uint64_t shaderGUID, std::vector<ShaderSourceMapping>& outMappings);
+
+    /// Restore serialized mappings from a persistent shader artifact.
+    /// Returns false if any SGUID conflicts with already restored or live state.
+    bool RestoreMappings(const ShaderSourceMapping* mappings, uint32_t count);
+
     /// Overrides
     ShaderSGUID Bind(const IL::Program &program, const IL::BasicBlock::ConstIterator& instruction) override;
     ShaderSourceMapping GetMapping(ShaderSGUID sguid) override;
@@ -64,6 +73,9 @@ private:
     /// Cached entry maps
     struct ShaderEntry {
         std::unordered_map<ShaderSourceMapping, ShaderSourceMapping> mappings;
+
+        /// Has an invalid source association diagnostic been emitted for this shader?
+        bool reportedInvalidSourceAssociation{false};
     };
 
 private:

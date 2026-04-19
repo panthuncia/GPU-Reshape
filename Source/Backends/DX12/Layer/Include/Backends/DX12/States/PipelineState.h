@@ -87,9 +87,7 @@ struct __declspec(uuid("7C251A06-33FD-42DF-8850-40C1077FCAFE")) PipelineState : 
 
     /// Check if there's an instrumentation request
     /// \return true if there's a request
-    bool HasInstrumentationRequest() const {
-        return instrumentationInfo.featureBitSet != 0;
-    }
+    bool HasInstrumentationRequest() const;
 
     /// Parent state
     ID3D12Device* parent{};

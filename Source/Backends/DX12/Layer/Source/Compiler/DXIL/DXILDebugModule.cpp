@@ -507,13 +507,15 @@ void DXILDebugModule::ParseFunction(LLVMBlock *block) {
 
             case LLVMFunctionRecord::DebugLOC:
             case LLVMFunctionRecord::DebugLOC2: {
-                instrMetadata.sourceAssociation.fileUID = 0;
+                instrMetadata.sourceAssociation.fileUID = UINT16_MAX;
                 instrMetadata.sourceAssociation.line = record.OpAs<uint32_t>(0) - 1;
                 instrMetadata.sourceAssociation.column = record.OpAs<uint32_t>(1) - 1;
 
                 // Has scope?
                 if (uint32_t scope = record.OpAs<uint32_t>(2); scope) {
-                    instrMetadata.sourceAssociation.fileUID = static_cast<uint16_t>(GetLinearFileUID(scope - 1));
+                    if (uint32_t linearFileUID = GetLinearFileUID(scope - 1); linearFileUID != UINT32_MAX && linearFileUID <= UINT16_MAX) {
+                        instrMetadata.sourceAssociation.fileUID = static_cast<uint16_t>(linearFileUID);
+                    }
                 }
 
                 if (isSemanticInstruction && functionMd.instructionMetadata.size()) {
@@ -1049,14 +1051,22 @@ void DXILDebugModule::FillCombinedSource(uint32_t fileUID, char *buffer) const {
 }
 
 uint32_t DXILDebugModule::GetLinearFileUID(uint32_t scopeMdId) {
+    if (scopeMdId >= thinMetadata.size()) {
+        ASSERT(false, "Unexpected scope id");
+        return UINT32_MAX;
+    }
+
     Metadata& md = thinMetadata[scopeMdId];
 
     // Handle scope
-    uint32_t fileMdId;
+    uint32_t fileMdId = UINT32_MAX;
     switch (md.type) {
         default:
             ASSERT(false, "Unexpected scope id");
-            return 0;
+            return UINT32_MAX;
+        case LLVMMetadataRecord::File: {
+            return md.file.linearFileUID;
+        }
         case LLVMMetadataRecord::SubProgram: {
             fileMdId = md.subProgram.fileMdId;
             break;
@@ -1079,9 +1089,23 @@ uint32_t DXILDebugModule::GetLinearFileUID(uint32_t scopeMdId) {
         }
     }
 
+    if (fileMdId == 0 || fileMdId == UINT32_MAX) {
+        ASSERT(false, "Unexpected null file metadata id");
+        return UINT32_MAX;
+    }
+
+    const uint32_t fileMdIndex = fileMdId - 1;
+    if (fileMdIndex >= thinMetadata.size()) {
+        ASSERT(false, "Unexpected file metadata id");
+        return UINT32_MAX;
+    }
+
     // Get file uid
-    Metadata& fileMd = thinMetadata[fileMdId - 1];
-    ASSERT(fileMd.type == LLVMMetadataRecord::File, "Unexpected node");
+    Metadata& fileMd = thinMetadata[fileMdIndex];
+    if (fileMd.type != LLVMMetadataRecord::File) {
+        ASSERT(false, "Unexpected node");
+        return UINT32_MAX;
+    }
 
     // OK
     return fileMd.file.linearFileUID;

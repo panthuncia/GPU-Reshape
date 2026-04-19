@@ -224,7 +224,7 @@ void InstrumentationController::CreatePipelineNoLock(PipelineState *state) {
     PropagateInstrumentationInfo(state);
 
     // Nothing of interest?
-    if (!state->instrumentationInfo.featureBitSet) {
+    if (!state->HasInstrumentationRequest()) {
         return;
     }
 
@@ -1133,6 +1133,9 @@ void InstrumentationController::CommitPipelines(DispatcherBucket* bucket, void *
         // Super set
         uint64_t superFeatureBitSet{0};
 
+        // Root binding info participates in shader instrumentation key identity.
+        const RootRegisterBindingInfo& signatureBindingInfo = state->signature->rootBindingInfo;
+
         // Set the module feature bit sets
         for (uint32_t shaderIndex = 0; shaderIndex < state->shaders.size(); shaderIndex++) {
             uint64_t featureBitSet = 0;
@@ -1155,6 +1158,7 @@ void InstrumentationController::CommitPipelines(DispatcherBucket* bucket, void *
             ShaderInstrumentationKey instrumentationKey{};
             instrumentationKey.featureBitSet = featureBitSet;
             instrumentationKey.physicalMapping = state->signature->physicalMapping;
+            instrumentationKey.bindingInfo = signatureBindingInfo;
 
             // Combine hashes
             instrumentationKey.combinedHash = state->instrumentationInfo.specializationHash;

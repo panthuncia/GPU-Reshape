@@ -31,6 +31,7 @@
 #include "RootSignaturePhysicalMapping.h"
 
 // Std
+#include <cstring>
 #include <cstdint>
 #include <tuple>
 
@@ -43,12 +44,89 @@ struct ShaderLocalInstrumentationKey {
 };
 
 struct ShaderInstrumentationKey {
+    static uint64_t GetPhysicalMappingHash(const RootSignaturePhysicalMapping* mapping) {
+        return mapping ? mapping->signatureHash : 0ull;
+    }
+
+    static auto BindingInfoAsTuple(const RootRegisterBindingInfo& bindingInfo) {
+        return std::make_tuple(
+            bindingInfo.global.space,
+            bindingInfo.global.shaderExportBaseRegister,
+            bindingInfo.global.shaderExportCount,
+            bindingInfo.global.resourcePRMTBaseRegister,
+            bindingInfo.global.samplerPRMTBaseRegister,
+            bindingInfo.global.shaderDataConstantRegister,
+            bindingInfo.global.descriptorConstantBaseRegister,
+            bindingInfo.global.eventConstantBaseRegister,
+            bindingInfo.global.shaderResourceBaseRegister,
+            bindingInfo.global.shaderResourceCount,
+            bindingInfo.bindings.space,
+            bindingInfo.bindings.shaderBindingResourceBaseRegister,
+            bindingInfo.bindings.shaderBindingResourceCount,
+            bindingInfo.local.space,
+            bindingInfo.local.descriptorConstantBaseRegister
+        );
+    }
+
+    static int CompareLocalKeyStrings(const char* lhs, const char* rhs) {
+        if (lhs == rhs) {
+            return 0;
+        }
+
+        if (!lhs) {
+            return -1;
+        }
+
+        if (!rhs) {
+            return 1;
+        }
+
+        const int result = std::strcmp(lhs, rhs);
+        if (result < 0) {
+            return -1;
+        }
+
+        if (result > 0) {
+            return 1;
+        }
+
+        return 0;
+    }
+
     auto AsTuple() const {
-        return std::make_tuple(featureBitSet, combinedHash);
+        return std::make_tuple(
+            featureBitSet,
+            combinedHash,
+            GetPhysicalMappingHash(physicalMapping),
+            BindingInfoAsTuple(bindingInfo),
+            localKeyCount
+        );
     }
 
     bool operator<(const ShaderInstrumentationKey& key) const {
-        return AsTuple() < key.AsTuple();
+        const auto lhsTuple = AsTuple();
+        const auto rhsTuple = key.AsTuple();
+        if (lhsTuple != rhsTuple) {
+            return lhsTuple < rhsTuple;
+        }
+
+        for (uint32_t index = 0; index < localKeyCount; ++index) {
+            const ShaderLocalInstrumentationKey& lhsLocalKey = localKeys[index];
+            const ShaderLocalInstrumentationKey& rhsLocalKey = key.localKeys[index];
+
+            const int nameOrder = CompareLocalKeyStrings(lhsLocalKey.mangledName, rhsLocalKey.mangledName);
+            if (nameOrder != 0) {
+                return nameOrder < 0;
+            }
+
+            const uint64_t lhsLocalHash = GetPhysicalMappingHash(lhsLocalKey.localPhysicalMapping);
+            const uint64_t rhsLocalHash = GetPhysicalMappingHash(rhsLocalKey.localPhysicalMapping);
+            if (lhsLocalHash != rhsLocalHash) {
+                return lhsLocalHash < rhsLocalHash;
+            }
+        }
+
+        return false;
     }
 
     /// Feature bit set

@@ -107,6 +107,10 @@ const char * DXILModule::GetLanguage() {
     return "DXIL";
 }
 
+std::string DXILModule::GetEntryPointName() {
+    return table.metadata.GetSourceArgumentValue("E");
+}
+
 bool DXILModule::IsOptimized() {
     return table.metadata.IsOptimized();
 }

@@ -606,6 +606,20 @@ ShaderState::~ShaderState() {
     
 }
 
+bool PipelineState::HasInstrumentationRequest() const {
+    if (instrumentationInfo.featureBitSet != 0) {
+        return true;
+    }
+
+    for (ShaderState* shaderState : shaders) {
+        if (shaderState && shaderState->instrumentationInfo.featureBitSet != 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void ShaderState::ReleaseHost() {
     // Remove tracked objects
     // Reference host has locked these

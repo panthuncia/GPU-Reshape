@@ -36,6 +36,7 @@
 #include <Backends/DX12/Compiler/DXBC/DXBCHeader.h>
 
 // Std
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -105,6 +106,9 @@ public:
 public:
     /// Is this module optimized?
     bool IsOptimized();
+
+    /// Get a source argument value from dx.source.args metadata.
+    std::string GetSourceArgumentValue(std::string_view name) const;
 
 public:
     /// Add or get a new input

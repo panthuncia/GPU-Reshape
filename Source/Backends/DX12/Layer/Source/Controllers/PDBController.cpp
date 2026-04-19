@@ -253,8 +253,57 @@ void PDBController::OnMessage(const struct IndexPDPathsMessage &message) {
     // Visit all paths
     for (const std::string &path: pdbPaths) {
         std::error_code error;
+        const auto directoryOptions = std::filesystem::directory_options::skip_permission_denied;
+        auto logPathError = [&](const char* prefix, const std::error_code& code) {
+            std::string diagnostic = prefix;
+            diagnostic += " '";
+            diagnostic += path;
+            diagnostic += "'";
+            if (code) {
+                diagnostic += " (code ";
+                diagnostic += std::to_string(code.value());
+                diagnostic += ": ";
+                diagnostic += code.message();
+                diagnostic += ")";
+            }
+            device->logBuffer->Add("DX12", LogSeverity::Error, diagnostic);
+        };
 
-        // Open handle for watching
+        if (!std::filesystem::exists(path, error)) {
+            logPathError("Failed to index missing PDB path:", error);
+            continue;
+        }
+
+        if (error) {
+            logPathError("Failed to query PDB path:", error);
+            continue;
+        }
+
+        // Recursive?
+        if (recursive) {
+            for (auto &&entry: std::filesystem::recursive_directory_iterator(path, directoryOptions, error)) {
+                if (entry.is_directory()) {
+                    continue;
+                }
+
+                IndexPathCandidates(path, entry.path());
+            }
+        } else {
+            for (auto &&entry: std::filesystem::directory_iterator(path, directoryOptions, error)) {
+                if (entry.is_directory()) {
+                    continue;
+                }
+
+                IndexPathCandidates(path, entry.path());
+            }
+        }
+
+        if (error) {
+            logPathError("Failed to iterate path:", error);
+            continue;
+        }
+
+        // Open handle for watching only after the initial scan succeeds.
         HANDLE dirHandle = CreateFileA(
             path.c_str(),
             FILE_LIST_DIRECTORY,
@@ -265,35 +314,15 @@ void PDBController::OnMessage(const struct IndexPDPathsMessage &message) {
             nullptr
         );
         if (dirHandle != INVALID_HANDLE_VALUE) {
-            // Start watcher
             watcherStates.push_back(WatcherState {
                 .thread = std::thread(&PDBController::FilePoolingThreadWorker, this, dirHandle, path),
                 .dirHandle = dirHandle
             });
-        }
-        
-        // Recursive?
-        if (recursive) {
-            for (auto &&entry: std::filesystem::recursive_directory_iterator(path, error)) {
-                if (entry.is_directory()) {
-                    continue;
-                }
-
-                IndexPathCandidates(path, entry.path());
-            }
         } else {
-            for (auto &&entry: std::filesystem::directory_iterator(path, error)) {
-                if (entry.is_directory()) {
-                    continue;
-                }
-
-                IndexPathCandidates(path, entry.path());
+            const DWORD lastErrorValue = GetLastError();
+            if (lastErrorValue != ERROR_SUCCESS) {
+                logPathError("Failed to watch PDB path:", std::error_code(static_cast<int>(lastErrorValue), std::system_category()));
             }
-        }
-
-        // OK?
-        if (!error) {
-            device->logBuffer->Add("DX12", LogSeverity::Error, Format("Failed to iterate path: '{0}'", path));
         }
     }
 }

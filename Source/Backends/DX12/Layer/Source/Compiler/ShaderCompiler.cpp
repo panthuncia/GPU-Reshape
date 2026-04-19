@@ -37,8 +37,12 @@
 #include <Backends/DX12/Compiler/DXBC/DXBCConverter.h>
 #include <Backends/DX12/Compiler/Tags.h>
 #include <Backends/DX12/ShaderData/ShaderDataHost.h>
+#include <Backends/DX12/Symbolizer/ShaderSGUIDHost.h>
 #include <Backends/DX12/Compiler/Diagnostic/DiagnosticType.h>
 #include <Backends/DX12/Compiler/DXMSCompiler.h>
+
+// Bridge
+#include <Bridge/Log/LogSeverity.h>
 
 // Backend
 #include <Backend/IFeatureHost.h>
@@ -50,6 +54,7 @@
 // Common
 #include <Common/CRC.h>
 #include <Common/FileSystem.h>
+#include <Common/Format.h>
 #include <Common/Hash.h>
 #include <Common/Dispatcher/Dispatcher.h>
 #include <Common/Registry.h>
@@ -60,7 +65,7 @@
 
 namespace {
     constexpr uint64_t kPersistentShaderArtifactMagic = 0x4843534452475047ull;
-    constexpr uint32_t kPersistentShaderArtifactVersion = 1u;
+    constexpr uint32_t kPersistentShaderArtifactVersion = 2u;
 
     struct PersistentShaderArtifactKey {
         uint32_t sourceBytecodeHash{0};
@@ -75,9 +80,10 @@ namespace {
         uint64_t magic{kPersistentShaderArtifactMagic};
         uint32_t version{kPersistentShaderArtifactVersion};
         uint32_t streamByteSize{0};
+        uint32_t mappingCount{0};
         PersistentShaderArtifactKey key{};
         uint8_t executionInfo{0};
-        uint8_t reserved[7]{};
+        uint8_t reserved[3]{};
     };
 
     static bool operator==(const PersistentShaderArtifactKey& lhs, const PersistentShaderArtifactKey& rhs) {
@@ -137,6 +143,11 @@ namespace {
         return key;
     }
 
+    static bool CanUsePersistentShaderArtifact(const ShaderJob& job) {
+        (void)job;
+        return true;
+    }
+
     static std::filesystem::path GetPersistentShaderArtifactPath(const PersistentShaderArtifactKey& key) {
         std::filesystem::path directory = GetIntermediateCachePath() / "DX12" / "ShaderInstrumentation";
         CreateDirectoryTree(directory);
@@ -185,6 +196,22 @@ namespace {
             }
         }
 
+        std::vector<ShaderSourceMapping> restoredMappings(header.mappingCount);
+        if (header.mappingCount) {
+            stream.read(reinterpret_cast<char*>(restoredMappings.data()), sizeof(ShaderSourceMapping) * header.mappingCount);
+            if (!stream) {
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+                shaderInstrument.stream.Clear();
+                return false;
+            }
+
+            if (!job.state->parent || !job.state->parent->sguidHost || !job.state->parent->sguidHost->RestoreMappings(restoredMappings.data(), header.mappingCount)) {
+                shaderInstrument.stream.Clear();
+                return false;
+            }
+        }
+
         shaderInstrument.featureTable.executionInfo = header.executionInfo != 0;
         return true;
     }
@@ -193,9 +220,14 @@ namespace {
         const PersistentShaderArtifactKey key = BuildPersistentShaderArtifactKey(job);
         const std::filesystem::path path = GetPersistentShaderArtifactPath(key);
         const std::filesystem::path tempPath = path.string() + ".tmp";
+        std::vector<ShaderSourceMapping> cachedMappings;
+        if (job.state->parent && job.state->parent->sguidHost) {
+            job.state->parent->sguidHost->CopyMappings(job.state->uid, cachedMappings);
+        }
 
         PersistentShaderArtifactHeader header{};
         header.streamByteSize = shaderInstrument.stream.GetByteSize();
+        header.mappingCount = static_cast<uint32_t>(cachedMappings.size());
         header.key = key;
         header.executionInfo = shaderInstrument.featureTable.executionInfo ? 1u : 0u;
 
@@ -208,6 +240,9 @@ namespace {
             stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
             if (header.streamByteSize) {
                 stream.write(reinterpret_cast<const char*>(shaderInstrument.stream.GetData()), header.streamByteSize);
+            }
+            if (header.mappingCount) {
+                stream.write(reinterpret_cast<const char*>(cachedMappings.data()), sizeof(ShaderSourceMapping) * header.mappingCount);
             }
 
             if (!stream) {
@@ -346,7 +381,16 @@ bool ShaderCompiler::InitializeModuleNoLock(ShaderState *state) {
         if (IDXModule* slimModule = CompileSlimModule(state->module)) {
             destroy(state->module, allocators);
             state->module = slimModule;
+            if (state->module->GetDebug()) {
+                device->logBuffer->Add("DX12", LogSeverity::Info, Format("Recovered embedded shader debug information for shader UID {} from a slim debug module.", state->uid));
+            }
+        } else {
+            device->logBuffer->Add("DX12", LogSeverity::Warning, Format("Failed to recover embedded shader debug information for shader UID {} from a slim debug module.", state->uid));
         }
+    }
+
+    if (!state->module->GetDebug()) {
+        device->logBuffer->Add("DX12", LogSeverity::Warning, Format("Shader UID {} initialized without DX12 debug metadata; SGUID source mapping will remain unresolved.", state->uid));
     }
 
     // OK
@@ -364,7 +408,7 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
 
     // Try to reuse a persisted artifact before touching the source module.
     ShaderInstrument cachedInstrument(allocators);
-    if (TryLoadPersistentShaderArtifact(job, cachedInstrument)) {
+    if (CanUsePersistentShaderArtifact(job) && TryLoadPersistentShaderArtifact(job, cachedInstrument)) {
         job.state->AddInstrument(job.instrumentationKey, new (allocators) ShaderInstrument(std::move(cachedInstrument)));
         ++job.diagnostic->passedJobs;
         return true;
@@ -451,7 +495,9 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
         debug->Add(debugPath, "instrumented", module);
     }
 
-    StorePersistentShaderArtifact(job, shaderInstrument);
+    if (CanUsePersistentShaderArtifact(job)) {
+        StorePersistentShaderArtifact(job, shaderInstrument);
+    }
 
     // Assign the instrument
     job.state->AddInstrument(job.instrumentationKey, new (allocators) ShaderInstrument(shaderInstrument));

@@ -35,6 +35,9 @@
 // Backend
 #include <Backend/IL/Program.h>
 
+// Common
+#include <Common/Format.h>
+
 // Message
 #include <Message/IMessageStorage.h>
 #include <Message/MessageStream.h>
@@ -44,6 +47,16 @@
 
 // Schemas
 #include <Schemas/SGUID.h>
+
+namespace {
+    static bool HasAssignedMapping(const ShaderSourceMapping& mapping) {
+        return mapping.sguid != InvalidShaderSGUID;
+    }
+
+    static bool HasSameAssignedMapping(const ShaderSourceMapping& lhs, const ShaderSourceMapping& rhs) {
+        return lhs == rhs && lhs.sguid == rhs.sguid;
+    }
+}
 
 ShaderSGUIDHost::ShaderSGUIDHost(DeviceState *device) :
     device(device),
@@ -99,6 +112,71 @@ void ShaderSGUIDHost::Commit(IBridge *bridge) {
     pendingSubmissions.clear();
 }
 
+void ShaderSGUIDHost::CopyMappings(uint64_t shaderGUID, std::vector<ShaderSourceMapping>& outMappings) {
+    std::lock_guard guard(mutex);
+
+    auto it = shaderEntries.find(shaderGUID);
+    if (it == shaderEntries.end()) {
+        return;
+    }
+
+    outMappings.reserve(outMappings.size() + it->second.mappings.size());
+    for (const auto& kv : it->second.mappings) {
+        outMappings.push_back(kv.second);
+    }
+}
+
+bool ShaderSGUIDHost::RestoreMappings(const ShaderSourceMapping* mappings, uint32_t count) {
+    if (!mappings && count) {
+        return false;
+    }
+
+    std::lock_guard guard(mutex);
+
+    for (uint32_t index = 0; index < count; ++index) {
+        const ShaderSourceMapping& mapping = mappings[index];
+        if (mapping.sguid == InvalidShaderSGUID || mapping.sguid >= sguidLookup.size()) {
+            return false;
+        }
+
+        const ShaderSourceMapping& existingForSGUID = sguidLookup.at(mapping.sguid);
+        if (HasAssignedMapping(existingForSGUID) && !HasSameAssignedMapping(existingForSGUID, mapping)) {
+            return false;
+        }
+
+        auto shaderIt = shaderEntries.find(mapping.shaderGUID);
+        if (shaderIt != shaderEntries.end()) {
+            auto mappingIt = shaderIt->second.mappings.find(mapping);
+            if (mappingIt != shaderIt->second.mappings.end() && mappingIt->second.sguid != mapping.sguid) {
+                return false;
+            }
+        }
+    }
+
+    for (uint32_t index = 0; index < count; ++index) {
+        const ShaderSourceMapping& mapping = mappings[index];
+        ShaderSourceMapping& existingForSGUID = sguidLookup.at(mapping.sguid);
+        const bool isNewSGUID = !HasAssignedMapping(existingForSGUID);
+
+        existingForSGUID = mapping;
+
+        ShaderEntry& shaderEntry = shaderEntries[mapping.shaderGUID];
+        if (auto it = shaderEntry.mappings.find(mapping); it == shaderEntry.mappings.end()) {
+            shaderEntry.mappings.emplace(mapping, mapping);
+        }
+
+        if (isNewSGUID) {
+            pendingSubmissions.push_back(mapping.sguid);
+        }
+
+        if (counter <= mapping.sguid) {
+            counter = mapping.sguid + 1u;
+        }
+    }
+
+    return true;
+}
+
 ShaderSGUID ShaderSGUIDHost::Bind(const IL::Program &program, const IL::BasicBlock::ConstIterator& instruction) {
     // Get instruction pointer
     const IL::Instruction* ptr = IL::ConstInstructionRef<>(instruction).Get();
@@ -126,12 +204,23 @@ ShaderSGUID ShaderSGUIDHost::Bind(const IL::Program &program, const IL::BasicBlo
     mapping.instructionIndex = traceback.instructionIndex;
     
     // Debug modules are optional
+    bool missingSourceAssociationWithDebugFiles = false;
+    uint32_t debugFileCount = 0;
+    std::string firstDebugFilename;
     if (IDXDebugModule* debugModule = shaderState->module->GetDebug()) {
+        debugFileCount = debugModule->GetFileCount();
+        if (debugFileCount != 0) {
+            std::string_view filename = debugModule->GetSourceFilename(0);
+            firstDebugFilename.assign(filename.data(), filename.size());
+        }
+
         // Try to get the association
         if (DXSourceAssociation sourceAssociation = debugModule->GetSourceAssociation(instruction.block->GetFunction(), ptr->source.codeOffset)) {
             mapping.fileUID = sourceAssociation.fileUID;
             mapping.line = sourceAssociation.line;
             mapping.column = sourceAssociation.column;
+        } else if (debugFileCount != 0) {
+            missingSourceAssociationWithDebugFiles = true;
         }
     }
 
@@ -144,6 +233,31 @@ ShaderSGUID ShaderSGUIDHost::Bind(const IL::Program &program, const IL::BasicBlo
     // Find mapping
     auto ssmIt = shaderEntry.mappings.find(mapping);
     if (ssmIt == shaderEntry.mappings.end()) {
+        if (missingSourceAssociationWithDebugFiles && !shaderEntry.reportedInvalidSourceAssociation) {
+            shaderEntry.reportedInvalidSourceAssociation = true;
+
+            uint64_t shaderUid = shaderState->uid;
+            uint32_t debugFiles = debugFileCount;
+            std::string_view firstFilename = firstDebugFilename.empty() ? std::string_view{"<unnamed>"} : std::string_view{firstDebugFilename};
+            uint32_t codeOffset = ptr->source.codeOffset;
+            uint64_t basicBlockId = mapping.basicBlockId;
+            uint64_t instructionIndex = mapping.instructionIndex;
+
+            device->logBuffer->Add(
+                "DX12",
+                LogSeverity::Warning,
+                Format(
+                    "Shader UID {} has DX12 debug sources ({} file(s), first file '{}') but no source association for code offset {} (basic block {}, instruction {}); this usually indicates a DXIL debug scope-to-file mapping failure.",
+                    shaderUid,
+                    debugFiles,
+                    firstFilename,
+                    codeOffset,
+                    basicBlockId,
+                    instructionIndex
+                )
+            );
+        }
+
         // Free indices?
         if (!freeIndices.empty()) {
             mapping.sguid = freeIndices.back();

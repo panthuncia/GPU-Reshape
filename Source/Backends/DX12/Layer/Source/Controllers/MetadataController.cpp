@@ -51,10 +51,24 @@
 #include <Schemas/Diagnostic.h>
 
 // Common
+#include <Common/Allocators.h>
 #include <Common/Dispatcher/Dispatcher.h>
+#include <Common/Format.h>
 
 // Std
 #include <sstream>
+
+namespace {
+
+std::string Dx12GetShaderEntryPointName(IDXModule* module) {
+    if (!module) {
+        return {};
+    }
+
+    return module->GetEntryPointName();
+}
+
+}
 
 MetadataController::MetadataController(DeviceState* device) : device(device) {
 
@@ -278,6 +292,10 @@ void MetadataController::OnMessage(const GetShaderCodeMessage& message) {
 
     // Get the language
     const char* language = shader->module->GetLanguage();
+    const std::string entryPoint = Dx12GetShaderEntryPointName(shader->module);
+    if (entryPoint.empty()) {
+        device->logBuffer->Add("DX12", LogSeverity::Info, Format("Shader UID {} metadata did not provide an entry point name.", message.shaderUID));
+    }
 
     // Is this module optimized?
     bool optimized = shader->module->IsOptimized();
@@ -288,11 +306,15 @@ void MetadataController::OnMessage(const GetShaderCodeMessage& message) {
     // No sources available?
     if (!debugModule || !debugModule->GetFileCount()) {
         // Add response
-        auto&& response = view.Add<ShaderCodeMessage>(ShaderCodeMessage::AllocationInfo { .languageLength = std::strlen(language) });
+        auto&& response = view.Add<ShaderCodeMessage>(ShaderCodeMessage::AllocationInfo {
+            .languageLength = std::strlen(language),
+            .entryPointLength = entryPoint.length()
+        });
         response->shaderUID = message.shaderUID;
         response->found = true;
         response->native = true;
         response->language.Set(language);
+        response->entryPoint.Set(entryPoint);
         response->optimized = optimized;
         response->fileCount = 0;
         response->poolCode = message.poolCode;
@@ -303,11 +325,15 @@ void MetadataController::OnMessage(const GetShaderCodeMessage& message) {
     const uint32_t fileCount = debugModule->GetFileCount();
 
     // Add response
-    auto&& response = view.Add<ShaderCodeMessage>(ShaderCodeMessage::AllocationInfo { .languageLength = std::strlen(language) });
+    auto&& response = view.Add<ShaderCodeMessage>(ShaderCodeMessage::AllocationInfo {
+        .languageLength = std::strlen(language),
+        .entryPointLength = entryPoint.length()
+    });
     response->shaderUID = message.shaderUID;
     response->found = true;
     response->native = false;
     response->language.Set(language);
+    response->entryPoint.Set(entryPoint);
     response->optimized = optimized;
     response->fileCount = fileCount;
     response->poolCode = message.poolCode;

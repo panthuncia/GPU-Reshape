@@ -47,6 +47,15 @@
  *   https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst
  */
 
+namespace {
+std::string_view NormalizeDxilSourceArgumentName(std::string_view name) {
+    while (!name.empty() && (name.front() == '-' || name.front() == '/')) {
+        name.remove_prefix(1);
+    }
+    return name;
+}
+}
+
 DXILPhysicalBlockMetadata::DXILPhysicalBlockMetadata(const Allocators &allocators, Backend::IL::Program &program, DXILPhysicalBlockTable &table) :
     DXILPhysicalBlockSection(allocators.Tag(kAllocModuleDXILMetadata), program, table),
     registerClasses(allocators.Tag(kAllocModuleDXILMetadata)),
@@ -1443,6 +1452,47 @@ bool DXILPhysicalBlockMetadata::IsOptimized() {
 
     // Probably optimized
     return true;
+}
+
+std::string DXILPhysicalBlockMetadata::GetSourceArgumentValue(std::string_view name) const {
+    if (sourceArguments.uid == ~0u) {
+        return {};
+    }
+
+    LLVMBlock* block = table.scan.GetRoot().GetBlockWithUID(sourceArguments.uid);
+    if (!block) {
+        return {};
+    }
+
+    const std::string_view normalizedName = NormalizeDxilSourceArgumentName(name);
+    for (uint32_t i = 0; i < sourceArguments.indirectList.opCount; i++) {
+        uint32_t listId = sourceArguments.indirectList.Op32(i);
+        const LLVMRecord& listRecord = block->records[listId - 1];
+
+        for (uint32_t argIndex = 0; argIndex < listRecord.opCount; ++argIndex) {
+            LLVMRecordStringView argStr(block->records[listRecord.Op32(argIndex) - 1], 0);
+            if (argStr.Length() == 0 || argStr.Length() > 1024) {
+                continue;
+            }
+
+            std::string argument(argStr.Length(), '\0');
+            argStr.Copy(argument.data());
+            if (NormalizeDxilSourceArgumentName(argument) != normalizedName) {
+                continue;
+            }
+
+            if (argIndex + 1 >= listRecord.opCount) {
+                return {};
+            }
+
+            LLVMRecordStringView valueStr(block->records[listRecord.Op32(argIndex + 1) - 1], 0);
+            std::string value(valueStr.Length(), '\0');
+            valueStr.Copy(value.data());
+            return value;
+        }
+    }
+
+    return {};
 }
 
 void DXILPhysicalBlockMetadata::CreateShaderExportHandle(const DXCompileJob& job) {

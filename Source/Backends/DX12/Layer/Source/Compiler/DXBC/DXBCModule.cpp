@@ -38,6 +38,25 @@
 // Common
 #include <Common/FileSystem.h>
 
+namespace {
+std::string_view NormalizeCompilerArgumentName(std::string_view name) {
+    while (!name.empty() && (name.front() == '-' || name.front() == '/')) {
+        name.remove_prefix(1);
+    }
+    return name;
+}
+
+std::string GetEntryPointNameFromSourceInfo(const DXBCPhysicalBlockShaderSourceInfo& info) {
+    for (const DXBCPhysicalBlockShaderSourceInfo::SourceArg& arg : info.sourceArgs) {
+        if (NormalizeCompilerArgumentName(arg.name) == "E" && !arg.value.empty()) {
+            return std::string(arg.value);
+        }
+    }
+
+    return {};
+}
+}
+
 // Std
 #include <fstream>
 
@@ -200,6 +219,18 @@ const char * DXBCModule::GetLanguage() {
 
     // Source is DXIL if the module is present
     return table.dxilModule ? "DXIL" : "DXBC";
+}
+
+std::string DXBCModule::GetEntryPointName() {
+    if (std::string entryPoint = GetEntryPointNameFromSourceInfo(table.debug.pdbShaderSourceInfo); !entryPoint.empty()) {
+        return entryPoint;
+    }
+
+    if (table.dxilModule) {
+        return table.dxilModule->GetEntryPointName();
+    }
+
+    return {};
 }
 
 bool DXBCModule::IsOptimized() {

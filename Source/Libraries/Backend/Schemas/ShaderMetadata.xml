@@ -70,6 +70,7 @@
     <message name="ShaderCode">
         <field name="shaderUID" type="uint64"/>
         <field name="language"  type="string"/>
+        <field name="entryPoint" type="string"/>
         <field name="optimized" type="bool"/>
         <field name="found"     type="bool"/>
         <field name="native"    type="bool"/>
