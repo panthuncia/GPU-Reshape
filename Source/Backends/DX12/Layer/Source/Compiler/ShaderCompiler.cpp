@@ -227,6 +227,7 @@ namespace {
 
     struct PersistentShaderArtifactRestoreTelemetry {
         uint32_t totalMappings = 0;
+        uint32_t rewrittenShaderGuidCount = 0;
         uint32_t remappedFileUidCount = 0;
         uint32_t remapMissCount = 0;
         uint32_t missingFilenameCount = 0;
@@ -240,6 +241,10 @@ namespace {
         std::string remapMissExampleFilename;
         uint32_t remapExampleOriginalFileUid = kInvalidShaderSourceFileUID;
         uint32_t remapMissExampleOriginalFileUid = kInvalidShaderSourceFileUID;
+        uint64_t rewrittenShaderGuidExampleOld = 0;
+        uint64_t rewrittenShaderGuidExampleNew = 0;
+        ShaderSGUID rewrittenShaderGuidExampleSguid = InvalidShaderSGUID;
+        bool hasRewrittenShaderGuidExample = false;
     };
 
     static void AppendPersistentShaderArtifactRestoreTelemetry(
@@ -252,9 +257,17 @@ namespace {
 
         const bool suspicious = telemetry.remapMissCount != 0
             || telemetry.missingFilenameCount != 0
-            || telemetry.debugModuleUnavailableCount != 0;
+            || telemetry.debugModuleUnavailableCount != 0
+            || telemetry.rewrittenShaderGuidCount != 0;
 
         std::string details;
+        if (telemetry.hasRewrittenShaderGuidExample) {
+            details += Format(
+                "; rewrittenShaderGuidExample(sguid={}, oldShaderUid={}, newShaderUid={})",
+                telemetry.rewrittenShaderGuidExampleSguid,
+                telemetry.rewrittenShaderGuidExampleOld,
+                telemetry.rewrittenShaderGuidExampleNew);
+        }
         if (telemetry.hasRemapExample) {
             details += Format(
                 "; remapExample(sguid={}, oldFileUid={}, newFileUid={}, file='{}')",
@@ -275,9 +288,10 @@ namespace {
             "DX12",
             suspicious ? LogSeverity::Warning : LogSeverity::Info,
             Format(
-                "Shader UID {} restored {} SGUID mapping(s) from persistent cache: remapped={}, remapMisses={}, missingFilenames={}, debugModuleUnavailable={}, invalidCachedFileUids={}{}",
+                "Shader UID {} restored {} SGUID mapping(s) from persistent cache: rewrittenShaderGuids={}, remapped={}, remapMisses={}, missingFilenames={}, debugModuleUnavailable={}, invalidCachedFileUids={}{}",
                 shaderUid,
                 telemetry.totalMappings,
+                telemetry.rewrittenShaderGuidCount,
                 telemetry.remappedFileUidCount,
                 telemetry.remapMissCount,
                 telemetry.missingFilenameCount,
@@ -331,6 +345,17 @@ namespace {
                 }
 
                 restoredMappings[index] = mappingHeader.mapping;
+                if (restoredMappings[index].shaderGUID != job.state->uid) {
+                    ++telemetry.rewrittenShaderGuidCount;
+                    if (!telemetry.hasRewrittenShaderGuidExample) {
+                        telemetry.hasRewrittenShaderGuidExample = true;
+                        telemetry.rewrittenShaderGuidExampleOld = restoredMappings[index].shaderGUID;
+                        telemetry.rewrittenShaderGuidExampleNew = job.state->uid;
+                        telemetry.rewrittenShaderGuidExampleSguid = restoredMappings[index].sguid;
+                    }
+                    restoredMappings[index].shaderGUID = job.state->uid;
+                }
+
                 const uint32_t originalFileUid = restoredMappings[index].fileUID;
                 if (originalFileUid == kInvalidShaderSourceFileUID) {
                     ++telemetry.invalidCachedFileUidCount;
