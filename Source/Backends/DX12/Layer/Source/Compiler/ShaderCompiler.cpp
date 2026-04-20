@@ -26,6 +26,7 @@
 
 #include <Backends/DX12/Compiler/ShaderCompiler.h>
 #include <Backends/DX12/Compiler/IDXModule.h>
+#include <Backends/DX12/Compiler/IDXDebugModule.h>
 #include <Backends/DX12/States/DeviceState.h>
 #include <Backends/DX12/Compiler/DXBC/DXBCModule.h>
 #include <Backends/DX12/Compiler/ShaderCompilerDebug.h>
@@ -60,12 +61,13 @@
 #include <Common/Registry.h>
 
 // Std
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 
 namespace {
     constexpr uint64_t kPersistentShaderArtifactMagic = 0x4843534452475047ull;
-    constexpr uint32_t kPersistentShaderArtifactVersion = 2u;
+    constexpr uint32_t kPersistentShaderArtifactVersion = 3u;
 
     struct PersistentShaderArtifactKey {
         uint32_t sourceBytecodeHash{0};
@@ -84,6 +86,11 @@ namespace {
         PersistentShaderArtifactKey key{};
         uint8_t executionInfo{0};
         uint8_t reserved[3]{};
+    };
+
+    struct PersistentShaderArtifactMappingHeader {
+        ShaderSourceMapping mapping{};
+        uint32_t sourceFilenameLength{0};
     };
 
     static bool operator==(const PersistentShaderArtifactKey& lhs, const PersistentShaderArtifactKey& rhs) {
@@ -117,6 +124,56 @@ namespace {
         CombineHash(hash, bindingInfo.local.descriptorConstantBaseRegister);
 
         return hash;
+    }
+
+    static std::string NormalizePersistentShaderSourceFilename(std::string_view filename) {
+        std::string normalized;
+        normalized.reserve(filename.size());
+
+        char previous = '\0';
+        for (char ch : filename) {
+            char normalizedChar = (ch == '\\') ? '/' : ch;
+            normalizedChar = static_cast<char>(std::tolower(static_cast<unsigned char>(normalizedChar)));
+
+            if (normalizedChar == '/' && previous == '/') {
+                continue;
+            }
+
+            normalized.push_back(normalizedChar);
+            previous = normalizedChar;
+        }
+
+        return normalized;
+    }
+
+    static std::string GetPersistentShaderSourceFilename(IDXDebugModule* debugModule, const ShaderSourceMapping& mapping) {
+        if (!debugModule || mapping.fileUID == kInvalidShaderSourceFileUID || mapping.fileUID >= debugModule->GetFileCount()) {
+            return {};
+        }
+
+        std::string_view filename = debugModule->GetSourceFilename(mapping.fileUID);
+        return std::string(filename.data(), filename.size());
+    }
+
+    static bool RemapPersistentShaderSourceFileUID(IDXDebugModule* debugModule, std::string_view cachedSourceFilename, ShaderSourceMapping& mapping) {
+        if (!debugModule || cachedSourceFilename.empty()) {
+            return false;
+        }
+
+        const std::string normalizedCachedSourceFilename = NormalizePersistentShaderSourceFilename(cachedSourceFilename);
+        if (normalizedCachedSourceFilename.empty()) {
+            return false;
+        }
+
+        const uint32_t fileCount = debugModule->GetFileCount();
+        for (uint32_t fileUID = 0; fileUID < fileCount; ++fileUID) {
+            if (NormalizePersistentShaderSourceFilename(debugModule->GetSourceFilename(fileUID)) == normalizedCachedSourceFilename) {
+                mapping.fileUID = static_cast<decltype(mapping.fileUID)>(fileUID);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     static uint64_t HashLocalInstrumentationKeys(const ShaderInstrumentationKey& instrumentationKey) {
@@ -168,6 +225,67 @@ namespace {
         return directory / name;
     }
 
+    struct PersistentShaderArtifactRestoreTelemetry {
+        uint32_t totalMappings = 0;
+        uint32_t remappedFileUidCount = 0;
+        uint32_t remapMissCount = 0;
+        uint32_t missingFilenameCount = 0;
+        uint32_t debugModuleUnavailableCount = 0;
+        uint32_t invalidCachedFileUidCount = 0;
+        ShaderSourceMapping remapExample{};
+        ShaderSourceMapping remapMissExample{};
+        bool hasRemapExample = false;
+        bool hasRemapMissExample = false;
+        std::string remapExampleFilename;
+        std::string remapMissExampleFilename;
+        uint32_t remapExampleOriginalFileUid = kInvalidShaderSourceFileUID;
+        uint32_t remapMissExampleOriginalFileUid = kInvalidShaderSourceFileUID;
+    };
+
+    static void AppendPersistentShaderArtifactRestoreTelemetry(
+        DeviceState* device,
+        uint64_t shaderUid,
+        const PersistentShaderArtifactRestoreTelemetry& telemetry) {
+        if (!device || telemetry.totalMappings == 0) {
+            return;
+        }
+
+        const bool suspicious = telemetry.remapMissCount != 0
+            || telemetry.missingFilenameCount != 0
+            || telemetry.debugModuleUnavailableCount != 0;
+
+        std::string details;
+        if (telemetry.hasRemapExample) {
+            details += Format(
+                "; remapExample(sguid={}, oldFileUid={}, newFileUid={}, file='{}')",
+                telemetry.remapExample.sguid,
+                telemetry.remapExampleOriginalFileUid,
+                telemetry.remapExample.fileUID,
+                telemetry.remapExampleFilename);
+        }
+        if (telemetry.hasRemapMissExample) {
+            details += Format(
+                "; remapMissExample(sguid={}, cachedFileUid={}, file='{}')",
+                telemetry.remapMissExample.sguid,
+                telemetry.remapMissExampleOriginalFileUid,
+                telemetry.remapMissExampleFilename);
+        }
+
+        device->logBuffer->Add(
+            "DX12",
+            suspicious ? LogSeverity::Warning : LogSeverity::Info,
+            Format(
+                "Shader UID {} restored {} SGUID mapping(s) from persistent cache: remapped={}, remapMisses={}, missingFilenames={}, debugModuleUnavailable={}, invalidCachedFileUids={}{}",
+                shaderUid,
+                telemetry.totalMappings,
+                telemetry.remappedFileUidCount,
+                telemetry.remapMissCount,
+                telemetry.missingFilenameCount,
+                telemetry.debugModuleUnavailableCount,
+                telemetry.invalidCachedFileUidCount,
+                details));
+    }
+
     static bool TryLoadPersistentShaderArtifact(const ShaderJob& job, ShaderInstrument& shaderInstrument) {
         const PersistentShaderArtifactKey key = BuildPersistentShaderArtifactKey(job);
         const std::filesystem::path path = GetPersistentShaderArtifactPath(key);
@@ -198,13 +316,70 @@ namespace {
 
         std::vector<ShaderSourceMapping> restoredMappings(header.mappingCount);
         if (header.mappingCount) {
-            stream.read(reinterpret_cast<char*>(restoredMappings.data()), sizeof(ShaderSourceMapping) * header.mappingCount);
-            if (!stream) {
-                std::error_code ec;
-                std::filesystem::remove(path, ec);
-                shaderInstrument.stream.Clear();
-                return false;
+            IDXDebugModule* debugModule = job.state->module ? job.state->module->GetDebug() : nullptr;
+            PersistentShaderArtifactRestoreTelemetry telemetry{};
+            telemetry.totalMappings = header.mappingCount;
+
+            for (uint32_t index = 0; index < header.mappingCount; ++index) {
+                PersistentShaderArtifactMappingHeader mappingHeader{};
+                stream.read(reinterpret_cast<char*>(&mappingHeader), sizeof(mappingHeader));
+                if (!stream) {
+                    std::error_code ec;
+                    std::filesystem::remove(path, ec);
+                    shaderInstrument.stream.Clear();
+                    return false;
+                }
+
+                restoredMappings[index] = mappingHeader.mapping;
+                const uint32_t originalFileUid = restoredMappings[index].fileUID;
+                if (originalFileUid == kInvalidShaderSourceFileUID) {
+                    ++telemetry.invalidCachedFileUidCount;
+                }
+
+                std::string cachedSourceFilename;
+                if (mappingHeader.sourceFilenameLength) {
+                    cachedSourceFilename.resize(mappingHeader.sourceFilenameLength);
+                    stream.read(cachedSourceFilename.data(), mappingHeader.sourceFilenameLength);
+                    if (!stream) {
+                        std::error_code ec;
+                        std::filesystem::remove(path, ec);
+                        shaderInstrument.stream.Clear();
+                        return false;
+                    }
+                }
+
+                if (!debugModule) {
+                    ++telemetry.debugModuleUnavailableCount;
+                    continue;
+                }
+
+                if (cachedSourceFilename.empty()) {
+                    ++telemetry.missingFilenameCount;
+                    continue;
+                }
+
+                if (RemapPersistentShaderSourceFileUID(debugModule, cachedSourceFilename, restoredMappings[index])) {
+                    if (restoredMappings[index].fileUID != originalFileUid) {
+                        ++telemetry.remappedFileUidCount;
+                        if (!telemetry.hasRemapExample) {
+                            telemetry.hasRemapExample = true;
+                            telemetry.remapExample = restoredMappings[index];
+                            telemetry.remapExampleFilename = cachedSourceFilename;
+                            telemetry.remapExampleOriginalFileUid = originalFileUid;
+                        }
+                    }
+                } else {
+                    ++telemetry.remapMissCount;
+                    if (!telemetry.hasRemapMissExample) {
+                        telemetry.hasRemapMissExample = true;
+                        telemetry.remapMissExample = restoredMappings[index];
+                        telemetry.remapMissExampleFilename = cachedSourceFilename;
+                        telemetry.remapMissExampleOriginalFileUid = originalFileUid;
+                    }
+                }
             }
+
+            AppendPersistentShaderArtifactRestoreTelemetry(job.state->parent, job.state->uid, telemetry);
 
             if (!job.state->parent || !job.state->parent->sguidHost || !job.state->parent->sguidHost->RestoreMappings(restoredMappings.data(), header.mappingCount)) {
                 shaderInstrument.stream.Clear();
@@ -221,8 +396,15 @@ namespace {
         const std::filesystem::path path = GetPersistentShaderArtifactPath(key);
         const std::filesystem::path tempPath = path.string() + ".tmp";
         std::vector<ShaderSourceMapping> cachedMappings;
+        std::vector<std::string> cachedSourceFilenames;
         if (job.state->parent && job.state->parent->sguidHost) {
             job.state->parent->sguidHost->CopyMappings(job.state->uid, cachedMappings);
+        }
+
+        cachedSourceFilenames.reserve(cachedMappings.size());
+        IDXDebugModule* debugModule = job.state->module ? job.state->module->GetDebug() : nullptr;
+        for (const ShaderSourceMapping& mapping : cachedMappings) {
+            cachedSourceFilenames.push_back(GetPersistentShaderSourceFilename(debugModule, mapping));
         }
 
         PersistentShaderArtifactHeader header{};
@@ -242,7 +424,16 @@ namespace {
                 stream.write(reinterpret_cast<const char*>(shaderInstrument.stream.GetData()), header.streamByteSize);
             }
             if (header.mappingCount) {
-                stream.write(reinterpret_cast<const char*>(cachedMappings.data()), sizeof(ShaderSourceMapping) * header.mappingCount);
+                for (uint32_t index = 0; index < header.mappingCount; ++index) {
+                    PersistentShaderArtifactMappingHeader mappingHeader{};
+                    mappingHeader.mapping = cachedMappings[index];
+                    mappingHeader.sourceFilenameLength = static_cast<uint32_t>(cachedSourceFilenames[index].size());
+
+                    stream.write(reinterpret_cast<const char*>(&mappingHeader), sizeof(mappingHeader));
+                    if (mappingHeader.sourceFilenameLength) {
+                        stream.write(cachedSourceFilenames[index].data(), mappingHeader.sourceFilenameLength);
+                    }
+                }
             }
 
             if (!stream) {
@@ -408,10 +599,16 @@ bool ShaderCompiler::CompileShader(const ShaderJob &job) {
 
     // Try to reuse a persisted artifact before touching the source module.
     ShaderInstrument cachedInstrument(allocators);
-    if (CanUsePersistentShaderArtifact(job) && TryLoadPersistentShaderArtifact(job, cachedInstrument)) {
-        job.state->AddInstrument(job.instrumentationKey, new (allocators) ShaderInstrument(std::move(cachedInstrument)));
-        ++job.diagnostic->passedJobs;
-        return true;
+    if (CanUsePersistentShaderArtifact(job)) {
+        if (!job.state->module) {
+            InitializeModule(job.state);
+        }
+
+        if (TryLoadPersistentShaderArtifact(job, cachedInstrument)) {
+            job.state->AddInstrument(job.instrumentationKey, new (allocators) ShaderInstrument(std::move(cachedInstrument)));
+            ++job.diagnostic->passedJobs;
+            return true;
+        }
     }
 
     // Initialize module
